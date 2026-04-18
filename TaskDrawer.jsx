@@ -1,56 +1,29 @@
 // Task drawer — per-task detail. Two tabs: Task (checklist) | Chat (thread + composer).
-// Sibling to AgentDrawer.jsx; reuses drawer-* CSS and adds task-drawer-head + .drawer.wide.
+// Sibling to AgentDrawer.jsx; reuses drawer-* CSS and Roster's tc-* message/composer styles.
 
-// Tool name → human label. Unknown tools fall through to the verbatim name.
-const TOOL_LABEL = {
+// Human-readable label for known tools; unknown tools fall through to the raw name (matches Roster).
+const TASK_TOOL_LABEL = {
   "search": "Searching",
   "filesystem.read": "Reading",
   "filesystem.write": "Editing",
   "exec": "Running",
   "http.get": "Fetching",
+  "doc.parse": "doc.parse",
+  "req.extract": "req.extract",
+  "kb.search": "kb.search",
+  "ref.adr": "ref.adr",
+  "capacity.est": "capacity.est",
 };
 
-// Walk a message stream and fold consecutive tool messages into single blocks.
-// Output items: { kind: 'tools' | 'agent' | 'user' | 'system', ... }
-function buildChatItems(messages) {
-  const items = [];
-  let bucket = null;
-
-  const flush = () => {
-    if (!bucket) return;
-    const counts = new Map();
-    for (const m of bucket.messages) counts.set(m.tool, (counts.get(m.tool) || 0) + 1);
-    const header = [...counts.entries()].map(([tool, n]) => {
-      const label = TOOL_LABEL[tool] || tool;
-      return n > 1 ? `${label} ×${n}` : label;
-    }).join(", ");
-    items.push({ kind: "tools", id: bucket.id, header, messages: bucket.messages });
-    bucket = null;
-  };
-
-  messages.forEach((m, i) => {
-    if (m.role === "tool") {
-      if (!bucket) bucket = { id: `tools-${i}`, messages: [] };
-      bucket.messages.push(m);
-    } else if (m.role === "agent") {
-      flush();
-      items.push({ kind: "agent", id: m.id || `a-${i}`, text: m.text, ts: m.ts });
-    } else if (m.role === "user") {
-      flush();
-      items.push({ kind: "user", id: m.id || `u-${i}`, text: m.text, ts: m.ts });
-    } else {
-      flush();
-      items.push({ kind: "system", id: m.id || `s-${i}`, text: m.text, ts: m.ts });
-    }
-  });
-  flush();
-  return items;
+function taskMinutesAgo(n) {
+  if (n === 0) return "just now";
+  if (n < 60) return `${n}m ago`;
+  return `${Math.floor(n / 60)}h ago`;
 }
 
 function TaskDrawer({ task, store, agents, onClose, onSelectAgent }) {
   const [tab, setTab] = React.useState("task");
   const [localMsgs, setLocalMsgs] = React.useState([]);
-  // Reset local messages when task changes
   React.useEffect(() => { setLocalMsgs([]); }, [task.id]);
 
   const [draft, setDraft] = React.useState("");
@@ -223,45 +196,43 @@ function TaskTab({ task, store }) {
   );
 }
 
-function ChatToolBlock({ item }) {
-  const [open, setOpen] = React.useState(false);
-  return (
-    <div className={"chat-toolblock " + (open ? "open" : "")}>
-      <button className="chat-toolblock-head" onClick={() => setOpen(v => !v)}>
-        <Icon name="bolt" size={11} />
-        <span className="chat-tb-label">{item.header}</span>
-        <Icon name="arrow" size={10} className="chev" />
-      </button>
-      {open && (
-        <div className="chat-toolblock-body">
-          {item.messages.map((m, i) => (
-            <div key={i} className="chat-tb-line mono">{m.text}</div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
 function ChatTab({ task, agent, localMsgs }) {
+  // Merge historical agent thread with task-local messages. Historical entries
+  // don't carry a ts, so we synthesize "Nm ago" timestamps the same way Roster does.
   const historical = (window.AppData?.agentThreads?.[task.agent]) || [];
-  const merged = [...historical, ...localMsgs];
-  const items = buildChatItems(merged);
+  const seeded = historical.map((m, i) => ({
+    ...m,
+    id: m.id || `hist-${i}`,
+    ts: m.ts || taskMinutesAgo(3 * (historical.length - i)),
+  }));
+  const merged = [...seeded, ...localMsgs];
+
   const scrollRef = React.useRef(null);
   React.useEffect(() => {
     if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-  }, [items.length]);
+  }, [merged.length]);
+
+  const whoOf = (m) => {
+    if (m.role === "user") return "You";
+    if (m.role === "agent") return agent?.name || "Agent";
+    if (m.role === "tool") return TASK_TOOL_LABEL[m.tool] || m.tool || "tool";
+    if (m.role === "status") return "Status";
+    return "System";
+  };
 
   return (
-    <div className="chat-tab" ref={scrollRef}>
-      {items.length === 0 && <div className="muted small">No activity yet.</div>}
-      {items.map(item => {
-        if (item.kind === "tools")  return <ChatToolBlock key={item.id} item={item} />;
-        if (item.kind === "agent")  return <div key={item.id} className="chat-paragraph">{item.text}</div>;
-        if (item.kind === "user")   return <div key={item.id} className="chat-bubble r-user">{item.text}</div>;
-        if (item.kind === "system") return <div key={item.id} className="chat-system">{item.text}</div>;
-        return null;
-      })}
+    <div className="tc-log chat-tab" ref={scrollRef}>
+      {merged.length === 0 ? (
+        <div className="tc-empty">No activity yet.</div>
+      ) : merged.map(m => (
+        <div key={m.id} className={"tc-msg r-" + m.role}>
+          <div className="tc-msg-meta">
+            <span className="who">{whoOf(m)}</span>
+            <span className="ts mono">{m.ts}</span>
+          </div>
+          <div className="tc-msg-body">{m.text}</div>
+        </div>
+      ))}
     </div>
   );
 }
@@ -274,36 +245,22 @@ function TaskComposer({ task, agent, draft, setDraft, onSend }) {
     ? "Task complete — send a note for the record…"
     : `Send a message to ${agent?.name || "this task"}…`;
   return (
-    <div className="chat-composer-rich">
+    <div className="tc-composer">
       <textarea
-        rows={2}
+        rows={1}
         value={draft}
         onChange={e => setDraft(e.target.value)}
         onKeyDown={onKey}
         placeholder={placeholder}
       />
-      <div className="chat-composer-tools">
-        <button className="ctt-btn" title="Settings" onClick={() => console.log("settings")}>
-          <Icon name="settings" size={12} />
-        </button>
-        <button className="ctt-btn" title="Attach" onClick={() => console.log("attach")}>
-          <Icon name="paperclip" size={12} />
-        </button>
-        <button className="ctt-btn" title="Voice" onClick={() => console.log("voice")}>
-          <Icon name="spark" size={12} />
-        </button>
-        <button className="ctt-btn ctt-text" title="Import" onClick={() => console.log("import")}>
-          Import
-        </button>
-        <button
-          className="ctt-send"
-          onClick={onSend}
-          disabled={!draft.trim()}
-          title="Send (Enter)"
-        >
-          <Icon name="arrow" size={11} /> Send
-        </button>
-      </div>
+      <button
+        className="tc-send"
+        onClick={onSend}
+        disabled={!draft.trim()}
+        title="Send (Enter)"
+      >
+        <Icon name="arrow" size={12} />
+      </button>
     </div>
   );
 }
