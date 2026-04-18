@@ -681,7 +681,7 @@ input, textarea { font-family: inherit; }
   animation: slideIn 0.2s cubic-bezier(0.2, 0.9, 0.3, 1);
   box-shadow: var(--shadow-lg);
 }
-.drawer.wide { width: 560px; }
+.drawer.wide { width: 560px; z-index: 50; }
 @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
 @keyframes slideIn { from { transform: translateX(24px); opacity: 0; } to { transform: none; opacity: 1; } }
 .drawer-header { display: flex; align-items: center; gap: 10px; padding: 14px 16px; border-bottom: 1px solid var(--line); }
