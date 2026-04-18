@@ -61,11 +61,35 @@ function TaskDrawer({ task, store, agents, onClose, onSelectAgent }) {
         </div>
 
         <div className="drawer-body">
-          {tab === "task" && <div className="muted small">Task tab (coming)</div>}
+          {tab === "task" && <TaskTab task={task} agent={agent} />}
           {tab === "chat" && <div className="muted small">Chat tab (coming)</div>}
         </div>
       </div>
     </>
+  );
+}
+
+function TaskTab({ task, agent }) {
+  const todos = task.todos || [];
+  return (
+    <div className="task-tab">
+      {task.activity && (
+        <div className="task-tab-activity">{task.activity}</div>
+      )}
+      <ul className="todo-items task-tab-todos">
+        {todos.map(td => (
+          <li key={td.id} className={"todo-row s-" + td.status}>
+            <span className="todo-check" data-status={td.status}>
+              {td.status === "done"  && <Icon name="check" size={11} />}
+              {td.status === "doing" && <span className="spinner" />}
+              {td.status === "todo"  && <span className="square" />}
+            </span>
+            <span className="todo-title">{td.text}</span>
+            {td.status === "doing" && <span className="todo-tag">doing</span>}
+          </li>
+        ))}
+      </ul>
+    </div>
   );
 }
 
