@@ -61,7 +61,7 @@ function TaskDrawer({ task, store, agents, onClose, onSelectAgent }) {
         </div>
 
         <div className="drawer-body">
-          {tab === "task" && <TaskTab task={task} agent={agent} />}
+          {tab === "task" && <TaskTab task={task} store={store} />}
           {tab === "chat" && <div className="muted small">Chat tab (coming)</div>}
         </div>
       </div>
@@ -69,26 +69,82 @@ function TaskDrawer({ task, store, agents, onClose, onSelectAgent }) {
   );
 }
 
-function TaskTab({ task, agent }) {
+function TaskTab({ task, store }) {
   const todos = task.todos || [];
+  const [adding, setAdding] = React.useState(false);
+  const [draft, setDraft] = React.useState("");
+
+  const writeTodos = (next) => store.update("tasks", task.id, { todos: next });
+
+  const cycle = (id) => {
+    const order = { todo: "doing", doing: "done", done: "todo" };
+    writeTodos(todos.map(td => td.id === id ? { ...td, status: order[td.status] } : td));
+  };
+
+  const remove = (id) => writeTodos(todos.filter(td => td.id !== id));
+
+  const commitAdd = () => {
+    const text = draft.trim();
+    if (!text) { setAdding(false); return; }
+    const id = `${task.id}-${Date.now().toString(36)}`;
+    writeTodos([...todos, { id, text, status: "todo" }]);
+    setDraft("");
+    setAdding(false);
+  };
+
+  const onAddKey = (e) => {
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); commitAdd(); }
+    if (e.key === "Escape") { e.preventDefault(); setAdding(false); setDraft(""); }
+  };
+
   return (
     <div className="task-tab">
-      {task.activity && (
-        <div className="task-tab-activity">{task.activity}</div>
-      )}
+      {task.activity && <div className="task-tab-activity">{task.activity}</div>}
+
       <ul className="todo-items task-tab-todos">
         {todos.map(td => (
           <li key={td.id} className={"todo-row s-" + td.status}>
-            <span className="todo-check" data-status={td.status}>
-              {td.status === "done"  && <Icon name="check" size={11} />}
-              {td.status === "doing" && <span className="spinner" />}
-              {td.status === "todo"  && <span className="square" />}
-            </span>
+            <button
+              className="todo-check-btn"
+              onClick={() => cycle(td.id)}
+              title={`Cycle status (${td.status})`}
+            >
+              <span className="todo-check" data-status={td.status}>
+                {td.status === "done"  && <Icon name="check" size={11} />}
+                {td.status === "doing" && <span className="spinner" />}
+                {td.status === "todo"  && <span className="square" />}
+              </span>
+            </button>
             <span className="todo-title">{td.text}</span>
             {td.status === "doing" && <span className="todo-tag">doing</span>}
+            <button
+              className="todo-del"
+              title="Remove step"
+              onClick={() => remove(td.id)}
+            >
+              <Icon name="x" size={10} />
+            </button>
           </li>
         ))}
       </ul>
+
+      {adding ? (
+        <div className="todo-add-row">
+          <textarea
+            autoFocus
+            rows={1}
+            value={draft}
+            onChange={e => setDraft(e.target.value)}
+            onKeyDown={onAddKey}
+            onBlur={commitAdd}
+            placeholder="New step…"
+          />
+        </div>
+      ) : (
+        <button className="todo-add-btn" onClick={() => setAdding(true)}>
+          <Icon name="plus" size={11} /> Add step
+        </button>
+      )}
     </div>
   );
 }
