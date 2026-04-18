@@ -134,7 +134,7 @@ function TaskDrawer({ task, store, agents, onClose, onSelectAgent }) {
           {tab === "chat" && (
             <>
               <ChatTab task={task} agent={agent} localMsgs={localMsgs} />
-              <Composer task={task} agent={agent} draft={draft} setDraft={setDraft} onSend={sendMessage} />
+              <TaskComposer task={task} agent={agent} draft={draft} setDraft={setDraft} onSend={sendMessage} />
             </>
           )}
         </div>
@@ -266,7 +266,7 @@ function ChatTab({ task, agent, localMsgs }) {
   );
 }
 
-function Composer({ task, agent, draft, setDraft, onSend }) {
+function TaskComposer({ task, agent, draft, setDraft, onSend }) {
   const onKey = (e) => {
     if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); onSend(); }
   };
