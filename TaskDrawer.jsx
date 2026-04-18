@@ -53,6 +53,26 @@ function TaskDrawer({ task, store, agents, onClose, onSelectAgent }) {
   // Reset local messages when task changes
   React.useEffect(() => { setLocalMsgs([]); }, [task.id]);
 
+  const [draft, setDraft] = React.useState("");
+  React.useEffect(() => { setDraft(""); }, [task.id]);
+
+  const sendMessage = () => {
+    const text = draft.trim();
+    if (!text) return;
+    const now = Date.now().toString(36);
+    const userMsg = { id: `${task.id}-u-${now}`, role: "user", text, ts: "just now" };
+    setLocalMsgs(prev => [...prev, userMsg]);
+    setDraft("");
+    setTimeout(() => {
+      const replyId = `${task.id}-a-${Date.now().toString(36)}`;
+      setLocalMsgs(prev => [...prev, {
+        id: replyId, role: "agent",
+        text: `Got it — incorporating your input into "${task.title}".`,
+        ts: "just now",
+      }]);
+    }, 600);
+  };
+
   React.useEffect(() => {
     const onKey = (e) => { if (e.key === "Escape") onClose(); };
     window.addEventListener("keydown", onKey);
@@ -111,7 +131,12 @@ function TaskDrawer({ task, store, agents, onClose, onSelectAgent }) {
 
         <div className="drawer-body">
           {tab === "task" && <TaskTab task={task} store={store} />}
-          {tab === "chat" && <ChatTab task={task} agent={agent} localMsgs={localMsgs} />}
+          {tab === "chat" && (
+            <>
+              <ChatTab task={task} agent={agent} localMsgs={localMsgs} />
+              <Composer task={task} agent={agent} draft={draft} setDraft={setDraft} onSend={sendMessage} />
+            </>
+          )}
         </div>
       </div>
     </>
@@ -237,6 +262,48 @@ function ChatTab({ task, agent, localMsgs }) {
         if (item.kind === "system") return <div key={item.id} className="chat-system">{item.text}</div>;
         return null;
       })}
+    </div>
+  );
+}
+
+function Composer({ task, agent, draft, setDraft, onSend }) {
+  const onKey = (e) => {
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); onSend(); }
+  };
+  const placeholder = task.status === "done"
+    ? "Task complete — send a note for the record…"
+    : `Send a message to ${agent?.name || "this task"}…`;
+  return (
+    <div className="chat-composer-rich">
+      <textarea
+        rows={2}
+        value={draft}
+        onChange={e => setDraft(e.target.value)}
+        onKeyDown={onKey}
+        placeholder={placeholder}
+      />
+      <div className="chat-composer-tools">
+        <button className="ctt-btn" title="Settings" onClick={() => console.log("settings")}>
+          <Icon name="settings" size={12} />
+        </button>
+        <button className="ctt-btn" title="Attach" onClick={() => console.log("attach")}>
+          <Icon name="paperclip" size={12} />
+        </button>
+        <button className="ctt-btn" title="Voice" onClick={() => console.log("voice")}>
+          <Icon name="spark" size={12} />
+        </button>
+        <button className="ctt-btn ctt-text" title="Import" onClick={() => console.log("import")}>
+          Import
+        </button>
+        <button
+          className="ctt-send"
+          onClick={onSend}
+          disabled={!draft.trim()}
+          title="Send (Enter)"
+        >
+          <Icon name="arrow" size={11} /> Send
+        </button>
+      </div>
     </div>
   );
 }
