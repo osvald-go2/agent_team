@@ -1,7 +1,3 @@
-// Task drawer — per-task detail. Two tabs: Task (checklist) | Chat (thread + composer).
-// Sibling to AgentDrawer.jsx; reuses drawer-* CSS and Roster's tc-* message/composer styles.
-
-// Human-readable label for known tools; unknown tools fall through to the raw name (matches Roster).
 const TASK_TOOL_LABEL = {
   "search": "Searching",
   "filesystem.read": "Reading",
@@ -21,29 +17,37 @@ function taskMinutesAgo(n) {
   return `${Math.floor(n / 60)}h ago`;
 }
 
-function TaskDrawer({ task, store, agents, onClose, onSelectAgent }) {
+function TaskDrawer({ task, store, agent, onClose, onSelectAgent }) {
   const [tab, setTab] = React.useState("task");
   const [localMsgs, setLocalMsgs] = React.useState([]);
-  React.useEffect(() => { setLocalMsgs([]); }, [task.id]);
-
   const [draft, setDraft] = React.useState("");
-  React.useEffect(() => { setDraft(""); }, [task.id]);
+  const pendingEchoes = React.useRef([]);
+
+  // Reset tab-local state + drop any unfired echo timers when switching tasks.
+  React.useEffect(() => {
+    setLocalMsgs([]);
+    setDraft("");
+    return () => {
+      pendingEchoes.current.forEach(clearTimeout);
+      pendingEchoes.current = [];
+    };
+  }, [task.id]);
 
   const sendMessage = () => {
     const text = draft.trim();
     if (!text) return;
     const now = Date.now().toString(36);
-    const userMsg = { id: `${task.id}-u-${now}`, role: "user", text, ts: "just now" };
-    setLocalMsgs(prev => [...prev, userMsg]);
+    setLocalMsgs(prev => [...prev, { id: `${task.id}-u-${now}`, role: "user", text, ts: "just now" }]);
     setDraft("");
-    setTimeout(() => {
-      const replyId = `${task.id}-a-${Date.now().toString(36)}`;
+    const timer = setTimeout(() => {
+      pendingEchoes.current = pendingEchoes.current.filter(t => t !== timer);
       setLocalMsgs(prev => [...prev, {
-        id: replyId, role: "agent",
+        id: `${task.id}-a-${Date.now().toString(36)}`, role: "agent",
         text: `Got it — incorporating your input into "${task.title}".`,
         ts: "just now",
       }]);
     }, 600);
+    pendingEchoes.current.push(timer);
   };
 
   React.useEffect(() => {
@@ -51,9 +55,6 @@ function TaskDrawer({ task, store, agents, onClose, onSelectAgent }) {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
-
-  if (!task) return null;
-  const agent = agents.find(a => a.id === task.agent);
 
   return (
     <>
@@ -197,8 +198,6 @@ function TaskTab({ task, store }) {
 }
 
 function ChatTab({ task, agent, localMsgs }) {
-  // Merge historical agent thread with task-local messages. Historical entries
-  // don't carry a ts, so we synthesize "Nm ago" timestamps the same way Roster does.
   const historical = (window.AppData?.agentThreads?.[task.agent]) || [];
   const seeded = historical.map((m, i) => ({
     ...m,

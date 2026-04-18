@@ -86,7 +86,10 @@ function App() {
     "avatar": "icon",
     "edgeFlow": "on"
   }/*EDITMODE-END*/;
-  const [settings, setSettings] = React.useState(TWEAK_DEFAULTS);
+  const [settings, setSettings] = React.useState(() => ({
+    ...TWEAK_DEFAULTS,
+    theme: localStorage.getItem("at.theme") || TWEAK_DEFAULTS.theme,
+  }));
 
   React.useEffect(() => { localStorage.setItem("at.page", page); }, [page]);
   // Clear detail when page tab changes (unless setPage was triggered by goToEntity)
@@ -101,6 +104,7 @@ function App() {
   React.useEffect(() => {
     document.documentElement.setAttribute("data-theme", settings.theme === "light" ? "" : settings.theme);
   }, [settings.theme]);
+  React.useEffect(() => { localStorage.setItem("at.theme", settings.theme); }, [settings.theme]);
 
   // Drag resizer
   React.useEffect(() => {
@@ -144,6 +148,8 @@ function App() {
   const selectedThread = selectedAgentId ? (D.agentThreads[selectedAgentId] || []) : [];
   const selectedTasks = selectedAgentId ? store.state.tasks.filter(t => t.agent === selectedAgentId) : [];
   const selectedTask = selectedTaskId ? store.state.tasks.find(t => t.id === selectedTaskId) : null;
+  const selectedTaskAgent = selectedTask ? store.state.agents.find(a => a.id === selectedTask.agent) : null;
+  const closeTaskDrawer = React.useCallback(() => setSelectedTaskId(null), []);
 
   const densityClass = "app-density-" + settings.density;
   const appClass = "app " + (settings.density !== "default" ? densityClass : "") + (page === "chat" && rightCollapsed ? " right-collapsed" : "");
@@ -234,7 +240,18 @@ function App() {
             <div className="page-wrap">
               <div className="page-head"><div><h2>Settings</h2><div className="sub">Workspace-wide configuration.</div></div></div>
               <div className="grid-card" style={{ maxWidth: 520 }}>
-                <div className="muted">Settings page placeholder.</div>
+                <div className="tweaks-row">
+                  <label>Theme</label>
+                  <div className="seg-group">
+                    {["light", "warm", "dark"].map(t => (
+                      <button
+                        key={t}
+                        className={settings.theme === t ? "active" : ""}
+                        onClick={() => persistSettings({ ...settings, theme: t })}
+                      >{t}</button>
+                    ))}
+                  </div>
+                </div>
               </div>
             </div>
           )}
@@ -253,8 +270,8 @@ function App() {
         <TaskDrawer
           task={selectedTask}
           store={store}
-          agents={store.state.agents}
-          onClose={() => setSelectedTaskId(null)}
+          agent={selectedTaskAgent}
+          onClose={closeTaskDrawer}
           onSelectAgent={setSelectedAgentId}
         />
       )}
