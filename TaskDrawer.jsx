@@ -49,6 +49,9 @@ function buildChatItems(messages) {
 
 function TaskDrawer({ task, store, agents, onClose, onSelectAgent }) {
   const [tab, setTab] = React.useState("task");
+  const [localMsgs, setLocalMsgs] = React.useState([]);
+  // Reset local messages when task changes
+  React.useEffect(() => { setLocalMsgs([]); }, [task.id]);
 
   React.useEffect(() => {
     const onKey = (e) => { if (e.key === "Escape") onClose(); };
@@ -108,7 +111,7 @@ function TaskDrawer({ task, store, agents, onClose, onSelectAgent }) {
 
         <div className="drawer-body">
           {tab === "task" && <TaskTab task={task} store={store} />}
-          {tab === "chat" && <div className="muted small">Chat tab (coming)</div>}
+          {tab === "chat" && <ChatTab task={task} agent={agent} localMsgs={localMsgs} />}
         </div>
       </div>
     </>
@@ -191,6 +194,49 @@ function TaskTab({ task, store }) {
           <Icon name="plus" size={11} /> Add step
         </button>
       )}
+    </div>
+  );
+}
+
+function ChatToolBlock({ item }) {
+  const [open, setOpen] = React.useState(false);
+  return (
+    <div className={"chat-toolblock " + (open ? "open" : "")}>
+      <button className="chat-toolblock-head" onClick={() => setOpen(v => !v)}>
+        <Icon name="bolt" size={11} />
+        <span className="chat-tb-label">{item.header}</span>
+        <Icon name="arrow" size={10} className="chev" />
+      </button>
+      {open && (
+        <div className="chat-toolblock-body">
+          {item.messages.map((m, i) => (
+            <div key={i} className="chat-tb-line mono">{m.text}</div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ChatTab({ task, agent, localMsgs }) {
+  const historical = (window.AppData?.agentThreads?.[task.agent]) || [];
+  const merged = [...historical, ...localMsgs];
+  const items = buildChatItems(merged);
+  const scrollRef = React.useRef(null);
+  React.useEffect(() => {
+    if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+  }, [items.length]);
+
+  return (
+    <div className="chat-tab" ref={scrollRef}>
+      {items.length === 0 && <div className="muted small">No activity yet.</div>}
+      {items.map(item => {
+        if (item.kind === "tools")  return <ChatToolBlock key={item.id} item={item} />;
+        if (item.kind === "agent")  return <div key={item.id} className="chat-paragraph">{item.text}</div>;
+        if (item.kind === "user")   return <div key={item.id} className="chat-bubble r-user">{item.text}</div>;
+        if (item.kind === "system") return <div key={item.id} className="chat-system">{item.text}</div>;
+        return null;
+      })}
     </div>
   );
 }
