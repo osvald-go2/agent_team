@@ -1,6 +1,52 @@
 // Task drawer — per-task detail. Two tabs: Task (checklist) | Chat (thread + composer).
 // Sibling to AgentDrawer.jsx; reuses drawer-* CSS and adds task-drawer-head + .drawer.wide.
 
+// Tool name → human label. Unknown tools fall through to the verbatim name.
+const TOOL_LABEL = {
+  "search": "Searching",
+  "filesystem.read": "Reading",
+  "filesystem.write": "Editing",
+  "exec": "Running",
+  "http.get": "Fetching",
+};
+
+// Walk a message stream and fold consecutive tool messages into single blocks.
+// Output items: { kind: 'tools' | 'agent' | 'user' | 'system', ... }
+function buildChatItems(messages) {
+  const items = [];
+  let bucket = null;
+
+  const flush = () => {
+    if (!bucket) return;
+    const counts = new Map();
+    for (const m of bucket.messages) counts.set(m.tool, (counts.get(m.tool) || 0) + 1);
+    const header = [...counts.entries()].map(([tool, n]) => {
+      const label = TOOL_LABEL[tool] || tool;
+      return n > 1 ? `${label} ×${n}` : label;
+    }).join(", ");
+    items.push({ kind: "tools", id: bucket.id, header, messages: bucket.messages });
+    bucket = null;
+  };
+
+  messages.forEach((m, i) => {
+    if (m.role === "tool") {
+      if (!bucket) bucket = { id: `tools-${i}`, messages: [] };
+      bucket.messages.push(m);
+    } else if (m.role === "agent") {
+      flush();
+      items.push({ kind: "agent", id: m.id || `a-${i}`, text: m.text, ts: m.ts });
+    } else if (m.role === "user") {
+      flush();
+      items.push({ kind: "user", id: m.id || `u-${i}`, text: m.text, ts: m.ts });
+    } else {
+      flush();
+      items.push({ kind: "system", id: m.id || `s-${i}`, text: m.text, ts: m.ts });
+    }
+  });
+  flush();
+  return items;
+}
+
 function TaskDrawer({ task, store, agents, onClose, onSelectAgent }) {
   const [tab, setTab] = React.useState("task");
 
