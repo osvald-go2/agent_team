@@ -2626,3 +2626,22 @@ input[type="text"], input[type="number"], input[type="password"], textarea, sele
 .dashboard { display: grid; grid-template-columns: 420px 1fr; gap: 24px; padding: 24px; overflow: auto; }
 .dashboard-left, .dashboard-right { display: flex; flex-direction: column; gap: 16px; }
 .ds-card { background: var(--bg-1); border: 1px solid var(--border-1); border-radius: 12px; padding: 20px; }
+
+/* NewProjectForm */
+.np-form { display: flex; flex-direction: column; gap: 12px; }
+.np-tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--border-1); padding-bottom: 8px; }
+.np-tab { background: transparent; border: 0; padding: 6px 10px; border-radius: 6px; font: inherit; font-size: 13px; color: var(--text-2); cursor: pointer; }
+.np-tab.active { background: var(--bg-2); color: var(--text-1); font-weight: 500; }
+.np-presets { display: flex; flex-direction: column; gap: 6px; }
+.np-preset { display: flex; align-items: flex-start; gap: 10px; padding: 10px; border: 1px solid var(--border-1); border-radius: 8px; cursor: pointer; }
+.np-preset.active { border-color: var(--accent-1); background: var(--accent-1-bg, rgba(224,133,88,0.06)); }
+.np-preset input { margin-top: 2px; }
+.np-preset-icon { width: 22px; height: 22px; display: flex; align-items: center; justify-content: center; border-radius: 6px; background: var(--bg-2); }
+.np-preset-text { display: flex; flex-direction: column; gap: 2px; }
+.np-preset-name { font-size: 13px; font-weight: 500; }
+.np-preset-desc { font-size: 11.5px; color: var(--text-3); }
+.np-field { display: flex; flex-direction: column; gap: 4px; }
+.np-field label { font-size: 11.5px; color: var(--text-3); }
+.np-field input, .np-field textarea, .np-field select { padding: 8px 10px; border: 1px solid var(--border-1); border-radius: 8px; font: inherit; font-size: 13px; background: var(--bg-1); color: var(--text-1); }
+.np-submit { justify-content: center; }
+.np-foot { margin-top: 4px; }

@@ -308,6 +308,7 @@ function App() {
             <Dashboard
               store={store}
               onOpenProject={(id) => switchProject(id)}
+              onOpenSession={switchSession}
               onQuickstart={(preset) => {
                 const { projectId, sessionId } = store.createProject({
                   name: preset.name,
