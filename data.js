@@ -412,6 +412,18 @@ window.AppData = (() => {
       status: "active",
       created: "2026-04-10",
       lastActive: "Now",
+      env: {
+        roots: [
+          {
+            id: "root-lh-docs",
+            label: "Docs & specs",
+            kind: "other",
+            repo: { type: "git", url: "github.com/acme/lighthouse-docs", branch: "main" },
+            agentId: null,
+          },
+        ],
+        configs: [],
+      },
     },
     {
       id: "proj-ai-report",
@@ -423,6 +435,35 @@ window.AppData = (() => {
       status: "active",
       created: "2026-04-12",
       lastActive: "Yesterday",
+      env: {
+        roots: [
+          {
+            id: "root-rep-java",
+            label: "Java backend",
+            kind: "java",
+            repo: { type: "git", url: "github.com/acme/reporting-java", branch: "main" },
+            agentId: "data-modeler",
+          },
+          {
+            id: "root-rep-go",
+            label: "Go backend",
+            kind: "go",
+            repo: { type: "git", url: "github.com/acme/reporting-go", branch: "main" },
+            agentId: "api-designer",
+          },
+        ],
+        configs: [
+          {
+            id: "cfg-gateway-prod",
+            name: "gateway-prod",
+            fields: {
+              tenant: "acme-prod",
+              user:   "${secret:gateway-prod.user}",
+              pass:   "${secret:gateway-prod.pass}",
+            },
+          },
+        ],
+      },
     },
     {
       id: "proj-pricing",
@@ -434,6 +475,7 @@ window.AppData = (() => {
       status: "active",
       created: "2026-04-05",
       lastActive: "2d ago",
+      env: { roots: [], configs: [] },
     },
     {
       id: "proj-outage",
@@ -445,6 +487,7 @@ window.AppData = (() => {
       status: "active",
       created: "2026-03-28",
       lastActive: "1w ago",
+      env: { roots: [], configs: [] },
     },
   ];
 
