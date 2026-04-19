@@ -2610,3 +2610,14 @@ input[type="text"], input[type="number"], input[type="password"], textarea, sele
 [data-theme="dark"] .md-body pre { background: oklch(0.24 0.012 255); }
 [data-theme="dark"] .hljs,
 [data-theme="dark"] .code-edt .hljs { color: var(--ink); }
+
+.crumb-home { background: transparent; border: 0; padding: 2px 6px; border-radius: 6px; cursor: pointer; color: var(--text-2); }
+.crumb-home:hover { background: var(--bg-2); color: var(--text-1); }
+.crumb-pop { position: relative; display: inline-flex; }
+.crumb-trigger { background: transparent; border: 0; padding: 4px 8px; border-radius: 6px; cursor: pointer; font: inherit; color: var(--text-1); display: inline-flex; gap: 4px; align-items: center; }
+.crumb-trigger:hover { background: var(--bg-2); }
+.crumb-menu { position: absolute; top: calc(100% + 4px); left: 0; z-index: 50; min-width: 240px; background: var(--bg-1); border: 1px solid var(--border-1); border-radius: 10px; box-shadow: 0 8px 24px rgba(0,0,0,0.08); padding: 4px; }
+.crumb-item { display: flex; justify-content: space-between; align-items: center; padding: 8px 10px; border-radius: 6px; cursor: pointer; font-size: 13px; gap: 12px; }
+.crumb-item:hover { background: var(--bg-2); }
+.crumb-item-meta { color: var(--text-3); font-family: var(--font-mono); font-size: 11px; }
+.crumb-new { color: var(--accent-1); border-top: 1px solid var(--border-1); margin-top: 2px; padding-top: 10px; }

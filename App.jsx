@@ -226,7 +226,19 @@ function App() {
 
   return (
     <div className={appClass} style={appStyle} data-screen-label={"App/" + page}>
-      <Topbar page={page} sessionName="Lighthouse" />
+      <Topbar
+        page={page}
+        projectName={(store.state.projects.find(p => p.id === currentProjectId) || {}).name}
+        sessionName={(store.state.sessions.find(s => s.id === currentSessionId) || {}).name}
+        projects={store.state.projects}
+        sessions={store.state.sessions}
+        currentProjectId={currentProjectId}
+        onHome={() => { setPage("dashboard"); setCurrent({ currentProjectId: null, currentSessionId: null }); }}
+        onSwitchProject={switchProject}
+        onSwitchSession={switchSession}
+        onNewProject={() => { setPage("dashboard"); }}
+        onNewSession={() => { if (currentProjectId) { const id = store.createSession(currentProjectId, {}); switchSession(id); } }}
+      />
       <Sidebar page={page} setPage={setPage} />
 
       {page === "chat" && (
