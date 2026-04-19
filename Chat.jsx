@@ -329,7 +329,7 @@ function WelcomeHero({ onStart, onPickTemplate, templates }) {
   );
 }
 
-function ChatArea({ onSelectAgent, conversation, agents, templates, forceEmpty, onExit }) {
+function ChatArea({ onSelectAgent, conversation, agents, templates, forceEmpty, onExit, store, currentSessionId }) {
   const [isEmpty, setIsEmpty] = React.useState(() => {
     if (forceEmpty !== undefined) return forceEmpty;
     try { return localStorage.getItem("at.chat.empty") === "1"; } catch { return false; }
@@ -359,7 +359,9 @@ function ChatArea({ onSelectAgent, conversation, agents, templates, forceEmpty, 
     handleStart(`Run the "${tpl.name}" team template. Scope: `);
   };
   const handleSend = (text) => {
-    if (!text?.trim()) return;
+    if (!text?.trim() || !currentSessionId || !store) return;
+    const id = `msg-${currentSessionId}-${Date.now().toString(36)}`;
+    store.create("conversation", { id, sessionId: currentSessionId, role: "user", text: text.trim() });
     goFull();
   };
 

@@ -249,6 +249,8 @@ function App() {
               conversation={slice.conversation}
               agents={D.agents}
               templates={D.templates}
+              store={store}
+              currentSessionId={currentSessionId}
             />
           </main>
           {!rightCollapsed && (
