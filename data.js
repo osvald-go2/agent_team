@@ -401,16 +401,6 @@ window.AppData = (() => {
     { id: "a6", sessionId: "sess-lighthouse-01", title: "Doc: include ADR-0041 reference", from: "domain-architect", age: "12m", priority: "low", status: "approved" },
   ];
 
-  const history = [
-    { id: "h1", name: "Lighthouse — PRD to Tech Design", when: "Now", status: "running", agents: 6, turns: 14, duration: "12m" },
-    { id: "h2", name: "Pricing v2 — GTM Launch plan", when: "Yesterday", status: "done", agents: 4, turns: 22, duration: "1h 04m" },
-    { id: "h3", name: "P0 Outage — RCA draft", when: "Yesterday", status: "done", agents: 3, turns: 9, duration: "28m" },
-    { id: "h4", name: "Mobile auth refactor review", when: "2d ago", status: "done", agents: 4, turns: 11, duration: "41m" },
-    { id: "h5", name: "Competitor matrix Q2", when: "3d ago", status: "done", agents: 5, turns: 18, duration: "52m" },
-    { id: "h6", name: "Data model — Billing v3", when: "5d ago", status: "cancelled", agents: 3, turns: 4, duration: "8m" },
-    { id: "h7", name: "Checkout perf audit", when: "1w ago", status: "done", agents: 4, turns: 16, duration: "36m" },
-  ];
-
   const projects = [
     {
       id: "proj-lighthouse",
@@ -477,5 +467,5 @@ window.AppData = (() => {
     { id: "sess-outage-02", projectId: "proj-outage", name: "Data model — Billing v3", status: "archived", agents: 3, turns: 4, duration: "8m",  when: "5d ago",    createdBy: "Lin Chen" },
   ];
 
-  return { agents, skills, knowledge, templates, projects, sessions, conversation, tasks, edges, nodePos, topologies, agentThreads, approvals, history };
+  return { agents, skills, knowledge, templates, projects, sessions, conversation, tasks, edges, nodePos, topologies, agentThreads, approvals };
 })();

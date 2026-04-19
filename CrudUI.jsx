@@ -17,7 +17,6 @@ function useEntityStore() {
     approvals:    [...D.approvals],
     tasks:        [...D.tasks],
     conversation: [...D.conversation],
-    history:      [...D.history],   // TEMP — retained until Task 14 deletes HistoryPage and the history array
   }));
 
   const create = React.useCallback((key, item) => {

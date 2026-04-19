@@ -332,8 +332,13 @@ function App() {
           {page === "templates" && (detail?.kind === "template"
             ? <TemplateDetail templateId={detail.id} store={store} goBack={backToList} goToEntity={goToEntity} />
             : <TemplatesPage store={store} onOpen={(id) => setDetail({ kind: "template", id })} />)}
-          {page === "sessions" && <HistoryPage store={store} />}
-          {page === "history" && <HistoryPage store={store} />}
+          {page === "sessions" && (
+            <SessionsPage
+              store={store}
+              currentProjectId={currentProjectId}
+              onOpenSession={switchSession}
+            />
+          )}
           {page === "approvals" && <ApprovalsPage store={store} agents={store.state.agents} />}
           {page === "settings" && (
             <div className="page-wrap">
