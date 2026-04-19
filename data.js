@@ -129,6 +129,7 @@ window.AppData = (() => {
   const conversation = [
     {
       id: "m1",
+      sessionId: "sess-lighthouse-01",
       role: "user",
       ts: "09:42",
       text: "Parse the attached PRD for Project Lighthouse and produce a full technical design. Target: Q3 launch. Focus on payments + notifications.",
@@ -136,6 +137,7 @@ window.AppData = (() => {
     },
     {
       id: "m2",
+      sessionId: "sess-lighthouse-01",
       role: "system",
       ts: "09:42",
       kind: "team-proposal",
@@ -144,6 +146,7 @@ window.AppData = (() => {
     },
     {
       id: "m3",
+      sessionId: "sess-lighthouse-01",
       role: "assistant",
       agent: "prd-analyst",
       ts: "09:43",
@@ -152,6 +155,7 @@ window.AppData = (() => {
     },
     {
       id: "m4",
+      sessionId: "sess-lighthouse-01",
       role: "assistant",
       agent: "domain-architect",
       ts: "09:46",
@@ -159,6 +163,7 @@ window.AppData = (() => {
     },
     {
       id: "m5",
+      sessionId: "sess-lighthouse-01",
       role: "system",
       ts: "09:46",
       kind: "approval",
@@ -175,6 +180,7 @@ window.AppData = (() => {
     },
     {
       id: "m6",
+      sessionId: "sess-lighthouse-01",
       role: "assistant",
       agent: "data-modeler",
       ts: "09:48",
@@ -184,18 +190,18 @@ window.AppData = (() => {
 
   // Kanban board tasks
   const tasks = [
-    { id: "t1", title: "Parse PRD v1.3", agent: "prd-analyst", status: "done", due: "09:45", priority: "P1", activity: "Completed · 24 stories extracted", todos: [
+    { id: "t1", sessionId: "sess-lighthouse-01", title: "Parse PRD v1.3", agent: "prd-analyst", status: "done", due: "09:45", priority: "P1", activity: "Completed · 24 stories extracted", todos: [
   { id: "t1-1", text: "Load PRD document",            status: "done" },
   { id: "t1-2", text: "Segment into user stories",    status: "done" },
   { id: "t1-3", text: "Tag stories by capability",    status: "done" },
   { id: "t1-4", text: "Emit requirements.json",       status: "done" },
 ] },
-    { id: "t2", title: "Extract NFRs & constraints", agent: "prd-analyst", status: "done", due: "09:45", priority: "P1", activity: "Completed · 11 NFRs, 3 conflicts flagged", todos: [
+    { id: "t2", sessionId: "sess-lighthouse-01", title: "Extract NFRs & constraints", agent: "prd-analyst", status: "done", due: "09:45", priority: "P1", activity: "Completed · 11 NFRs, 3 conflicts flagged", todos: [
   { id: "t2-1", text: "Sweep PRD for NFR terms",      status: "done" },
   { id: "t2-2", text: "Extract latency / SLO claims", status: "done" },
   { id: "t2-3", text: "Flag conflicts between NFRs",  status: "done" },
 ] },
-    { id: "t3", title: "Draft bounded contexts", agent: "domain-architect", status: "running", due: "10:10", priority: "P1", activity: "Drafting context map · 4/6 contexts", todos: [
+    { id: "t3", sessionId: "sess-lighthouse-01", title: "Draft bounded contexts", agent: "domain-architect", status: "running", due: "10:10", priority: "P1", activity: "Drafting context map · 4/6 contexts", todos: [
   { id: "t3-1", text: "Extract entities from PRD",    status: "done" },
   { id: "t3-2", text: "Identify aggregate roots",     status: "done" },
   { id: "t3-3", text: "Draft payments context",       status: "done" },
@@ -203,48 +209,48 @@ window.AppData = (() => {
   { id: "t3-5", text: "Sketch integration seams",     status: "doing" },
   { id: "t3-6", text: "Review with data-modeler",     status: "todo" },
 ] },
-    { id: "t4", title: "Integration pattern ADR", agent: "domain-architect", status: "awaiting", due: "10:20", priority: "P1", activity: "Awaiting your decision on sync vs async", todos: [
+    { id: "t4", sessionId: "sess-lighthouse-01", title: "Integration pattern ADR", agent: "domain-architect", status: "awaiting", due: "10:20", priority: "P1", activity: "Awaiting your decision on sync vs async", todos: [
   { id: "t4-1", text: "Enumerate integration options",                  status: "done" },
   { id: "t4-2", text: "Compare sync vs async tradeoffs",                status: "done" },
   { id: "t4-3", text: "Awaiting your decision on sync vs async",        status: "doing" },
   { id: "t4-4", text: "Write ADR once decision is recorded",            status: "todo" },
 ] },
-    { id: "t5", title: "Ledger schema v0", agent: "data-modeler", status: "awaiting", due: "10:40", priority: "P2", activity: "Awaiting confirmation on partition key", todos: [
+    { id: "t5", sessionId: "sess-lighthouse-01", title: "Ledger schema v0", agent: "data-modeler", status: "awaiting", due: "10:40", priority: "P2", activity: "Awaiting confirmation on partition key", todos: [
   { id: "t5-1", text: "Draft candidate partition keys",                 status: "done" },
   { id: "t5-2", text: "Awaiting confirmation on partition key choice",  status: "doing" },
   { id: "t5-3", text: "Lock schema v0",                                 status: "todo" },
 ] },
-    { id: "t6", title: "Partitioning strategy memo", agent: "data-modeler", status: "running", due: "10:30", priority: "P2", activity: "Comparing range vs hash partitioning", todos: [
+    { id: "t6", sessionId: "sess-lighthouse-01", title: "Partitioning strategy memo", agent: "data-modeler", status: "running", due: "10:30", priority: "P2", activity: "Comparing range vs hash partitioning", todos: [
   { id: "t6-1", text: "Gather ledger access patterns",    status: "done" },
   { id: "t6-2", text: "Compare range vs hash partitioning", status: "doing" },
   { id: "t6-3", text: "Recommend partition strategy",     status: "todo" },
 ] },
-    { id: "t7", title: "Payments API draft", agent: "api-designer", status: "queued", due: "11:00", priority: "P1", activity: "Waiting on bounded contexts", todos: [
+    { id: "t7", sessionId: "sess-lighthouse-01", title: "Payments API draft", agent: "api-designer", status: "queued", due: "11:00", priority: "P1", activity: "Waiting on bounded contexts", todos: [
   { id: "t7-1", text: "Outline payments endpoints",       status: "todo" },
   { id: "t7-2", text: "Define request/response schemas",  status: "todo" },
   { id: "t7-3", text: "Draft OpenAPI spec",               status: "todo" },
 ] },
-    { id: "t8", title: "Webhook contract", agent: "api-designer", status: "queued", due: "11:15", priority: "P2", activity: "Waiting on integration ADR", todos: [
+    { id: "t8", sessionId: "sess-lighthouse-01", title: "Webhook contract", agent: "api-designer", status: "queued", due: "11:15", priority: "P2", activity: "Waiting on integration ADR", todos: [
   { id: "t8-1", text: "List webhook events",              status: "todo" },
   { id: "t8-2", text: "Design retry / signing policy",    status: "todo" },
   { id: "t8-3", text: "Write contract doc",               status: "todo" },
 ] },
-    { id: "t9", title: "Threat model (payments)", agent: "risk-reviewer", status: "queued", due: "11:30", priority: "P1", activity: "Waiting on Payments API draft", todos: [
+    { id: "t9", sessionId: "sess-lighthouse-01", title: "Threat model (payments)", agent: "risk-reviewer", status: "queued", due: "11:30", priority: "P1", activity: "Waiting on Payments API draft", todos: [
   { id: "t9-1", text: "Enumerate payment trust boundaries", status: "todo" },
   { id: "t9-2", text: "Identify STRIDE threats",            status: "todo" },
   { id: "t9-3", text: "Propose mitigations",                status: "todo" },
 ] },
-    { id: "t10", title: "SLO & cost assessment", agent: "risk-reviewer", status: "queued", due: "11:45", priority: "P2", activity: "Waiting on schema + API", todos: [
+    { id: "t10", sessionId: "sess-lighthouse-01", title: "SLO & cost assessment", agent: "risk-reviewer", status: "queued", due: "11:45", priority: "P2", activity: "Waiting on schema + API", todos: [
   { id: "t10-1", text: "Estimate steady-state QPS",       status: "todo" },
   { id: "t10-2", text: "Derive SLO budgets",              status: "todo" },
   { id: "t10-3", text: "Draft cost model",                status: "todo" },
 ] },
-    { id: "t11", title: "Assemble design doc", agent: "tech-writer", status: "queued", due: "12:20", priority: "P1", activity: "Waiting on architecture sign-off", todos: [
+    { id: "t11", sessionId: "sess-lighthouse-01", title: "Assemble design doc", agent: "tech-writer", status: "queued", due: "12:20", priority: "P1", activity: "Waiting on architecture sign-off", todos: [
   { id: "t11-1", text: "Assemble context + architecture sections", status: "todo" },
   { id: "t11-2", text: "Integrate ADRs and diagrams",              status: "todo" },
   { id: "t11-3", text: "Add risk & migration appendices",          status: "todo" },
 ] },
-    { id: "t12", title: "Diagrams export", agent: "tech-writer", status: "queued", due: "12:30", priority: "P3", activity: "Waiting on context map", todos: [
+    { id: "t12", sessionId: "sess-lighthouse-01", title: "Diagrams export", agent: "tech-writer", status: "queued", due: "12:30", priority: "P3", activity: "Waiting on context map", todos: [
   { id: "t12-1", text: "Export context-map diagram",   status: "todo" },
   { id: "t12-2", text: "Export sequence diagrams",     status: "todo" },
   { id: "t12-3", text: "Bundle diagrams for doc",      status: "todo" },
@@ -253,16 +259,16 @@ window.AppData = (() => {
 
   // Kept for backwards-compat (used by old Canvas). New Canvas reads `topologies`.
   const edges = [
-    ["prd-analyst", "domain-architect"],
-    ["prd-analyst", "data-modeler"],
-    ["domain-architect", "api-designer"],
-    ["domain-architect", "data-modeler"],
-    ["api-designer", "risk-reviewer"],
-    ["data-modeler", "risk-reviewer"],
-    ["domain-architect", "tech-writer"],
-    ["api-designer", "tech-writer"],
-    ["data-modeler", "tech-writer"],
-    ["risk-reviewer", "tech-writer"],
+    { from: "prd-analyst",      to: "domain-architect", sessionId: "sess-lighthouse-01" },
+    { from: "prd-analyst",      to: "data-modeler",     sessionId: "sess-lighthouse-01" },
+    { from: "domain-architect", to: "api-designer",     sessionId: "sess-lighthouse-01" },
+    { from: "domain-architect", to: "data-modeler",     sessionId: "sess-lighthouse-01" },
+    { from: "api-designer",     to: "risk-reviewer",    sessionId: "sess-lighthouse-01" },
+    { from: "data-modeler",     to: "risk-reviewer",    sessionId: "sess-lighthouse-01" },
+    { from: "domain-architect", to: "tech-writer",      sessionId: "sess-lighthouse-01" },
+    { from: "api-designer",     to: "tech-writer",      sessionId: "sess-lighthouse-01" },
+    { from: "data-modeler",     to: "tech-writer",      sessionId: "sess-lighthouse-01" },
+    { from: "risk-reviewer",    to: "tech-writer",      sessionId: "sess-lighthouse-01" },
   ];
   const nodePos = {
     "prd-analyst":       { x: 8,  y: 46 },
@@ -383,12 +389,12 @@ window.AppData = (() => {
   };
 
   const approvals = [
-    { id: "a1", title: "Architecture: sync vs async payment confirmation", from: "domain-architect", age: "3m", priority: "high", status: "pending" },
-    { id: "a2", title: "Data: allow PII in analytics warehouse (masked)?", from: "risk-reviewer", age: "just now", priority: "high", status: "pending" },
-    { id: "a3", title: "Tool use: call external FX rates API", from: "api-designer", age: "1m", priority: "med", status: "pending" },
-    { id: "a4", title: "Budget: promote Redis to HA tier (+$240/mo)", from: "data-modeler", age: "5m", priority: "med", status: "pending" },
-    { id: "a5", title: "Spec: include feature flag for gradual rollout", from: "tech-writer", age: "8m", priority: "low", status: "approved" },
-    { id: "a6", title: "Doc: include ADR-0041 reference", from: "domain-architect", age: "12m", priority: "low", status: "approved" },
+    { id: "a1", sessionId: "sess-lighthouse-01", title: "Architecture: sync vs async payment confirmation", from: "domain-architect", age: "3m", priority: "high", status: "pending" },
+    { id: "a2", sessionId: "sess-lighthouse-01", title: "Data: allow PII in analytics warehouse (masked)?", from: "risk-reviewer", age: "just now", priority: "high", status: "pending" },
+    { id: "a3", sessionId: "sess-lighthouse-01", title: "Tool use: call external FX rates API", from: "api-designer", age: "1m", priority: "med", status: "pending" },
+    { id: "a4", sessionId: "sess-lighthouse-01", title: "Budget: promote Redis to HA tier (+$240/mo)", from: "data-modeler", age: "5m", priority: "med", status: "pending" },
+    { id: "a5", sessionId: "sess-lighthouse-01", title: "Spec: include feature flag for gradual rollout", from: "tech-writer", age: "8m", priority: "low", status: "approved" },
+    { id: "a6", sessionId: "sess-lighthouse-01", title: "Doc: include ADR-0041 reference", from: "domain-architect", age: "12m", priority: "low", status: "approved" },
   ];
 
   const history = [
