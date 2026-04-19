@@ -240,7 +240,10 @@ Fallback dispatch to a different agent is not attempted automatically
   until bound).
 - A given `agentId` may appear on **at most one** root in a project
   (enforced on write; prevents ambiguous routing). It can appear on zero
-  roots (free agent).
+  roots (free agent). Attempting to bind an already-bound agent causes
+  `addRoot` / `updateRoot` to reject the mutation and surface an inline
+  error below the offending field in the edit popover (no toast, no
+  silent revert).
 - `kind` is a free-ish enum for display + orchestrator heuristics; unknown
   values fall back to a generic folder icon.
 - `repo.url` is the **canonical identifier** for collaboration — it is
@@ -320,6 +323,8 @@ Operate on the project entity's `env` field. All mutations go through
 - `setSecret(configName, fieldName, value)` → writes
   `at.secrets["{configName}.{fieldName}"]`.
 - `clearSecret(configName, fieldName)` → deletes the entry.
+- `setScratchBase(path)` → writes `at.scratchBase`. Empty/whitespace
+  falls back to the `~/.atelier` default.
 
 Pure selectors (no side effects), also exported:
 
