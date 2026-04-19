@@ -158,36 +158,37 @@ function Message({ msg, agents, onSelectAgent, onDecide }) {
   );
 }
 
-const Composer = React.forwardRef(function Composer({ onSend, empty, value, onChange }, ref) {
-  const [localText, setLocalText] = React.useState("");
-  const text = value !== undefined ? value : localText;
-  const setText = onChange || setLocalText;
+const Composer = React.forwardRef(function Composer({ empty, onSend, value, onChange, placeholder = "Describe what you want to create..." }, ref) {
   const taRef = React.useRef(null);
   React.useImperativeHandle(ref, () => ({
     focus: () => taRef.current?.focus(),
-    setValue: (v) => { setText(v); setTimeout(() => taRef.current?.focus(), 0); },
+    setValue: (v) => { onChange?.(v); setTimeout(() => taRef.current?.focus(), 0); },
   }));
+  const send = () => {
+    if (!value?.trim()) return;
+    onSend?.(value);
+    onChange?.("");
+  };
   return (
-    <div className={"composer-wrap" + (empty ? " composer-empty" : "")}>
-      <div className={"composer" + (empty ? " is-empty" : "")}>
-        <textarea
-          ref={taRef}
-          placeholder={empty
-            ? "Describe a goal — e.g. “Parse this PRD and produce a technical design.”"
-            : "Give the team a new instruction, or reply with context…"}
-          value={text}
-          onChange={e => setText(e.target.value)}
-          onKeyDown={e => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { onSend?.(text); setText(""); } }}
-        />
-        <div className="tools">
-          <button className="tool-btn"><Icon name="paperclip" size={13} /> Attach</button>
-          <button className="tool-btn"><Icon name="book" size={13} /> Knowledge</button>
-          <button className="tool-btn"><Icon name="user" size={13} /> @ mention agent</button>
-          <button className="tool-btn"><Icon name="branch" size={13} /> Fork</button>
-          <button className="send-btn" onClick={() => { onSend?.(text); setText(""); }}>
-            <Icon name="send" size={13} /> Send <span className="mono hint">⌘↵</span>
-          </button>
-        </div>
+    <div className="composer">
+      <textarea
+        ref={taRef}
+        className="composer-input"
+        value={value || ""}
+        onChange={e => onChange?.(e.target.value)}
+        onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
+        placeholder={placeholder}
+        rows={1}
+      />
+      <div className="composer-bar">
+        <button className="cmp-icon" title="Settings" onClick={() => {}}><Icon name="sliders" size={13} /></button>
+        <button className="cmp-icon" title="Attach"   onClick={() => {}}><Icon name="paperclip" size={13} /></button>
+        <button className="cmp-icon" title="Voice"    onClick={() => {}}><Icon name="mic" size={13} /></button>
+        <button className="cmp-icon cmp-import"       onClick={() => {}}><Icon name="upload" size={12} /> Import</button>
+        <div className="cmp-spacer" />
+        <button className="primary-btn cmp-send" disabled={!value?.trim()} onClick={send}>
+          <Icon name="send" size={12} /> Send
+        </button>
       </div>
     </div>
   );

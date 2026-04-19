@@ -2676,3 +2676,13 @@ input[type="text"], input[type="number"], input[type="password"], textarea, sele
 .inline-notice { display: inline-flex; align-items: center; gap: 8px; padding: 8px 12px; border-radius: 8px; background: var(--accent-1-bg, rgba(224,133,88,0.08)); border: 1px solid var(--border-1); color: var(--text-2); font-size: 12.5px; }
 .in-text { flex: 1; }
 .in-action { background: transparent; border: 0; color: var(--accent-1); cursor: pointer; font: inherit; font-weight: 500; }
+
+.composer { border: 1px solid var(--border-1); border-radius: 12px; padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; background: var(--bg-1); }
+.composer-input { border: 0; outline: none; resize: none; font: inherit; font-size: 14px; line-height: 1.55; color: var(--text-1); background: transparent; min-height: 24px; }
+.composer-bar { display: flex; align-items: center; gap: 4px; }
+.cmp-icon { background: transparent; border: 0; padding: 6px; border-radius: 6px; cursor: pointer; color: var(--text-2); display: inline-flex; align-items: center; gap: 4px; font: inherit; font-size: 12.5px; }
+.cmp-icon:hover { background: var(--bg-2); color: var(--text-1); }
+.cmp-import { padding: 6px 10px; }
+.cmp-spacer { flex: 1; }
+.cmp-send { padding: 7px 14px; }
+.cmp-send[disabled] { opacity: 0.5; cursor: not-allowed; }
