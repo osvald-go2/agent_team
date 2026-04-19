@@ -304,6 +304,21 @@ function App() {
           style={{ gridColumn: "2 / -1", borderRight: "none", overflow: "auto" }}
           data-screen-label={"Page/" + page}
         >
+          {page === "dashboard" && (
+            <Dashboard
+              store={store}
+              onOpenProject={(id) => switchProject(id)}
+              onQuickstart={(preset) => {
+                const { projectId, sessionId } = store.createProject({
+                  name: preset.name,
+                  description: preset.description,
+                  defaultTemplateId: preset.defaultTemplateId,
+                  icon: preset.icon,
+                });
+                switchSession(sessionId);
+              }}
+            />
+          )}
           {page === "agents" && (detail?.kind === "agent"
             ? <AgentDetail agentId={detail.id} store={store} goBack={backToList} goToEntity={goToEntity} />
             : <AgentsPage store={store} onOpen={(id) => setDetail({ kind: "agent", id })} />)}

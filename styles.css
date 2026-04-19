@@ -2621,3 +2621,8 @@ input[type="text"], input[type="number"], input[type="password"], textarea, sele
 .crumb-item:hover { background: var(--bg-2); }
 .crumb-item-meta { color: var(--text-3); font-family: var(--font-mono); font-size: 11px; }
 .crumb-new { color: var(--accent-1); border-top: 1px solid var(--border-1); margin-top: 2px; padding-top: 10px; }
+
+/* Dashboard */
+.dashboard { display: grid; grid-template-columns: 420px 1fr; gap: 24px; padding: 24px; overflow: auto; }
+.dashboard-left, .dashboard-right { display: flex; flex-direction: column; gap: 16px; }
+.ds-card { background: var(--bg-1); border: 1px solid var(--border-1); border-radius: 12px; padding: 20px; }
