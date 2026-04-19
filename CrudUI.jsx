@@ -47,7 +47,119 @@ function useEntityStore() {
     });
   }, []);
 
-  return { state, create, update, remove, duplicate };
+  const createProject = React.useCallback(({ name, description, defaultTemplateId, icon, color }) => {
+    const projectId = `proj-${Date.now().toString(36)}`;
+    const sessionId = `sess-${Date.now().toString(36)}`;
+    const now = "Now";
+    setState(s => ({
+      ...s,
+      projects: [
+        {
+          id: projectId,
+          name: name || "Untitled project",
+          description: description || "",
+          icon: icon || "cube",
+          color: color || "oklch(0.72 0.13 80)",
+          defaultTemplateId: defaultTemplateId || null,
+          status: "active",
+          created: now,
+          lastActive: now,
+        },
+        ...s.projects,
+      ],
+      sessions: [
+        {
+          id: sessionId,
+          projectId,
+          name: `${name || "Untitled"} · Session 1`,
+          status: "draft",
+          agents: 0, turns: 0, duration: "0m", when: now,
+          createdBy: "Lin Chen",
+        },
+        ...s.sessions,
+      ],
+      conversation: [
+        { id: `msg-${sessionId}-0`, sessionId, role: "system", text: "Team ready — describe what you want to work on." },
+        ...s.conversation,
+      ],
+    }));
+    return { projectId, sessionId };
+  }, []);
+
+  const createSession = React.useCallback((projectId, { name } = {}) => {
+    const sessionId = `sess-${Date.now().toString(36)}`;
+    const now = "Now";
+    setState(s => ({
+      ...s,
+      sessions: [
+        {
+          id: sessionId,
+          projectId,
+          name: name || "New session",
+          status: "draft",
+          agents: 0, turns: 0, duration: "0m", when: now,
+          createdBy: "Lin Chen",
+        },
+        ...s.sessions,
+      ],
+      conversation: [
+        { id: `msg-${sessionId}-0`, sessionId, role: "system", text: "Team ready — describe what you want to work on." },
+        ...s.conversation,
+      ],
+    }));
+    return sessionId;
+  }, []);
+
+  const archiveProject = React.useCallback((id) => {
+    setState(s => ({ ...s, projects: s.projects.map(p => p.id === id ? { ...p, status: "archived" } : p) }));
+  }, []);
+
+  const archiveSession = React.useCallback((id) => {
+    setState(s => ({ ...s, sessions: s.sessions.map(x => x.id === id ? { ...x, status: "archived" } : x) }));
+  }, []);
+
+  const renameProject = React.useCallback((id, name) => {
+    setState(s => ({ ...s, projects: s.projects.map(p => p.id === id ? { ...p, name } : p) }));
+  }, []);
+
+  const renameSession = React.useCallback((id, name) => {
+    setState(s => ({ ...s, sessions: s.sessions.map(x => x.id === id ? { ...x, name } : x) }));
+  }, []);
+
+  const deleteSession = React.useCallback((id) => {
+    setState(s => ({
+      ...s,
+      sessions:     s.sessions.filter(x => x.id !== id),
+      conversation: s.conversation.filter(m => m.sessionId !== id),
+      tasks:        s.tasks.filter(t => t.sessionId !== id),
+      approvals:    s.approvals.filter(a => a.sessionId !== id),
+    }));
+    // Note: D.edges, D.nodePos, D.agentThreads are read-only (live on window.AppData, not store).
+    // Mutating them is out of scope for this prototype; stale entries are acceptable.
+  }, []);
+
+  const deleteProject = React.useCallback((id) => {
+    setState(s => {
+      const doomedSessionIds = s.sessions.filter(x => x.projectId === id).map(x => x.id);
+      const doomed = new Set(doomedSessionIds);
+      return {
+        ...s,
+        projects:     s.projects.filter(p => p.id !== id),
+        sessions:     s.sessions.filter(x => x.projectId !== id),
+        conversation: s.conversation.filter(m => !doomed.has(m.sessionId)),
+        tasks:        s.tasks.filter(t => !doomed.has(t.sessionId)),
+        approvals:    s.approvals.filter(a => !doomed.has(a.sessionId)),
+      };
+    });
+  }, []);
+
+  return {
+    state, create, update, remove, duplicate,
+    createProject, createSession,
+    archiveProject, archiveSession,
+    renameProject, renameSession,
+    deleteProject, deleteSession,
+  };
 }
 
 /* ——— Dropdown row menu ——— */
