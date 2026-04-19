@@ -1459,11 +1459,9 @@ Delete the `{page === "history" && <HistoryPage ... />}` line. Replace with:
 
 Also remove the `history: ["Workspace", "History"]` entry from `crumbMap` in `Shell.jsx`.
 
-- [ ] **Step 3: Drop `history` export from `data.js`.**
+- [ ] **Step 3: Drop `history` from the `return` of `data.js`'s IIFE.**
 
-The final `return` line: remove `history`.
-
-Bump `data.js?v=7` → `?v=8`.
+The `const history = [...]` declaration was already removed in Step 0b. Also delete `history` from the final `return { agents, ..., history }` line so the exported object no longer carries it. The cache bump from Step 0b (`?v=7` → `?v=8`) covers this edit too — do NOT bump again.
 
 - [ ] **Step 4: Hard-reload and verify.**
 
@@ -1676,36 +1674,51 @@ git commit -m "chat: wire handleSend to persist user messages in store conversat
 - Modify: `Chat.jsx` (the existing `Composer` / input area at the bottom of `ChatArea`)
 - Modify: `styles.css`
 
-- [ ] **Step 1: Replace the Composer markup.**
+- [ ] **Step 1: Read the existing `Composer` signature first.**
+
+It is exported from `Chat.jsx` as a `React.forwardRef` that accepts `{ empty, onSend, value, onChange }` (see line 405 in `ChatArea`: `<Composer ref={composerRef} empty={isEmpty} onSend={handleSend} value={draft} onChange={setDraft} />`). The `onSend` prop is what Task 16b wires through — it **must** be preserved or persistence breaks.
+
+- [ ] **Step 2: Replace the Composer markup while preserving the prop contract.**
 
 ```jsx
-function Composer({ placeholder = "Describe what you want to create..." }) {
-  const [text, setText] = React.useState("");
+const Composer = React.forwardRef(function Composer({ empty, onSend, value, onChange, placeholder = "Describe what you want to create..." }, ref) {
+  // Preserve any imperative handle the old Composer exposed (e.g. setValue). If the old
+  // code used useImperativeHandle(ref, () => ({ setValue })), keep that block verbatim.
+  const send = () => {
+    if (!value?.trim()) return;
+    onSend?.(value);
+    onChange?.("");
+  };
   return (
     <div className="composer">
       <textarea
         className="composer-input"
-        value={text}
-        onChange={e => setText(e.target.value)}
+        value={value || ""}
+        onChange={e => onChange?.(e.target.value)}
+        onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
         placeholder={placeholder}
         rows={1}
       />
       <div className="composer-bar">
-        <button className="cmp-icon" title="Settings"><Icon name="sliders" size={13} /></button>
-        <button className="cmp-icon" title="Attach"><Icon name="paperclip" size={13} /></button>
-        <button className="cmp-icon" title="Voice"><Icon name="mic" size={13} /></button>
-        <button className="cmp-icon cmp-import"><Icon name="upload" size={12} /> Import</button>
+        <button className="cmp-icon" title="Settings" onClick={() => {}}><Icon name="sliders" size={13} /></button>
+        <button className="cmp-icon" title="Attach"   onClick={() => {}}><Icon name="paperclip" size={13} /></button>
+        <button className="cmp-icon" title="Voice"    onClick={() => {}}><Icon name="mic" size={13} /></button>
+        <button className="cmp-icon cmp-import"       onClick={() => {}}><Icon name="upload" size={12} /> Import</button>
         <div className="cmp-spacer" />
-        <button className="primary-btn cmp-send" disabled={!text.trim()}>
+        <button className="primary-btn cmp-send" disabled={!value?.trim()} onClick={send}>
           <Icon name="send" size={12} /> Send
         </button>
       </div>
     </div>
   );
-}
+});
 ```
 
-- [ ] **Step 2: Confirm `icons.jsx` has `paperclip`, `mic`, `upload`, `send`, `sliders`.**
+Key points: the new Composer reads/writes `value`/`onChange` from the parent (which is `ChatArea`'s `draft` state); clicking Send calls `onSend(value)` (which goes to `handleSend` → `store.create("conversation", ...)` from Task 16b); after send, `onChange("")` clears the draft. Do NOT introduce a local `const [text, setText]` — that would shadow the parent's draft and break Task 16b.
+
+If the old Composer also called `useImperativeHandle(ref, () => ({ setValue }))` (see `Chat.jsx` around line 351 where `composerRef.current?.setValue(text)` is used), preserve that imperative handle — add it back inside the new forwardRef body.
+
+- [ ] **Step 3: Confirm `icons.jsx` has `paperclip`, `mic`, `upload`, `send`, `sliders`.**
 
 These should all exist after Task 7b (Chunk 1b) and the base icon set. Sanity check:
 ```bash
@@ -1713,7 +1726,7 @@ grep -E '^  (paperclip|send|sliders):|"(mic|upload)":' icons.jsx
 ```
 Expect 5 hits. If any are missing, stop and revisit Task 7b.
 
-- [ ] **Step 3: Add styles.**
+- [ ] **Step 4: Add styles.**
 
 ```css
 .composer { border: 1px solid var(--border-1); border-radius: 12px; padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; background: var(--bg-1); }
@@ -1729,13 +1742,16 @@ Expect 5 hits. If any are missing, stop and revisit Task 7b.
 
 Bump `styles.css?v=30` → `?v=31` in `index.html`.
 
-- [ ] **Step 4: Hard-reload and verify.**
+- [ ] **Step 5: Hard-reload and verify.**
 
-- Chat bottom shows single-line composer with 4 icon buttons + Import text button on the left, Send on the right.
+- Chat bottom shows single-line composer with 4 icon buttons (⚙/📎/🎤) + Import text button on the left, Send on the right.
 - Typing text enables Send.
-- All buttons are visual only (no-op); no errors on click.
+- Pressing Enter (no Shift) sends; Shift+Enter inserts a newline.
+- The ⚙/📎/🎤/Import buttons are visual only (onClick is `() => {}`); clicking them produces no console errors.
+- After Send, the draft textarea clears and the new message appears as a "You" bubble (this proves Task 16b's wiring survived Task 17's Composer rewrite).
+- Switch sessions via crumb popover and back — the sent message persists.
 
-- [ ] **Step 5: Commit.**
+- [ ] **Step 6: Commit.**
 
 ```bash
 git add Chat.jsx styles.css icons.jsx index.html
