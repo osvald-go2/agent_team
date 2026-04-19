@@ -2645,3 +2645,22 @@ input[type="text"], input[type="number"], input[type="password"], textarea, sele
 .np-field input, .np-field textarea, .np-field select { padding: 8px 10px; border: 1px solid var(--border-1); border-radius: 8px; font: inherit; font-size: 13px; background: var(--bg-1); color: var(--text-1); }
 .np-submit { justify-content: center; }
 .np-foot { margin-top: 4px; }
+
+.rp-tabs { display: flex; gap: 4px; margin-bottom: 12px; }
+.rp-tab { background: transparent; border: 0; padding: 6px 10px; border-radius: 6px; font: inherit; font-size: 13px; color: var(--text-2); cursor: pointer; }
+.rp-tab.active { background: var(--bg-2); color: var(--text-1); font-weight: 500; }
+.rp-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 14px; }
+.rp-card { cursor: pointer; border: 1px solid var(--border-1); border-radius: 10px; overflow: hidden; transition: border-color 0.15s; display: flex; flex-direction: column; }
+.rp-card:hover { border-color: var(--accent-1); }
+.rp-folder { aspect-ratio: 16/9; display: flex; align-items: center; justify-content: center; color: white; opacity: 0.85; }
+.rp-meta { padding: 10px 12px; }
+.rp-name { font-size: 13px; font-weight: 500; }
+.rp-empty { padding: 24px 8px; text-align: center; }
+
+.qs-title { display: flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 500; color: var(--text-2); margin-bottom: 10px; }
+.qs-row { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 10px; }
+.qs-card { text-align: left; background: var(--bg-1); border: 1px solid var(--border-1); border-radius: 10px; padding: 12px; cursor: pointer; display: flex; flex-direction: column; gap: 6px; font: inherit; }
+.qs-card:hover { border-color: var(--accent-1); }
+.qs-card-icon { width: 28px; height: 28px; display: flex; align-items: center; justify-content: center; border-radius: 8px; background: var(--bg-2); }
+.qs-card-name { font-size: 13px; font-weight: 500; }
+.qs-card-desc { font-size: 11.5px; }

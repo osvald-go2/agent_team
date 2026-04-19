@@ -84,7 +84,68 @@ function NewProjectForm({ store, templates, onCreated }) {
   );
 }
 
+function RecentProjects({ projects, sessionsByProject, onOpen }) {
+  const [tab, setTab] = React.useState("recent"); // recent | all | archived
+  const list = React.useMemo(() => {
+    const active = projects.filter(p => p.status !== "archived");
+    if (tab === "archived") return projects.filter(p => p.status === "archived");
+    if (tab === "all") return active;
+    return active.slice(0, 8);
+  }, [tab, projects]);
+  return (
+    <div className="ds-card rp">
+      <div className="rp-tabs">
+        {[["recent","Recent"], ["all","All"], ["archived","Archived"]].map(([k,l]) => (
+          <button key={k} className={"rp-tab " + (tab===k ? "active" : "")} onClick={() => setTab(k)}>{l}</button>
+        ))}
+      </div>
+      {list.length === 0 ? (
+        <div className="rp-empty muted">No projects yet. Create one on the left or pick a Quickstart below.</div>
+      ) : (
+        <div className="rp-grid">
+          {list.map(p => (
+            <div key={p.id} className="rp-card" onClick={() => onOpen(p.id)}>
+              <div className="rp-folder" style={{ background: p.color }}>
+                <Icon name={p.icon || "cube"} size={22} />
+              </div>
+              <div className="rp-meta">
+                <div className="rp-name">{p.name}</div>
+                <div className="rp-sub muted small">{(sessionsByProject[p.id] || []).length} sessions · {p.lastActive}</div>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function QuickstartRow({ onPick }) {
+  return (
+    <div className="ds-card qs">
+      <div className="qs-title"><Icon name="spark" size={14} /> Quickstart</div>
+      <div className="qs-row">
+        {QUICKSTART_PRESETS.map(p => (
+          <button key={p.id} className="qs-card" onClick={() => onPick(p)}>
+            <div className="qs-card-icon"><Icon name={p.icon} size={18} /></div>
+            <div className="qs-card-name">{p.name}</div>
+            <div className="qs-card-desc muted small">{p.description}</div>
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function Dashboard({ store, onOpenProject, onQuickstart, onOpenSession }) {
+  const sessionsByProject = React.useMemo(() => {
+    const m = {};
+    for (const s of store.state.sessions) {
+      (m[s.projectId] = m[s.projectId] || []).push(s);
+    }
+    return m;
+  }, [store.state.sessions]);
+
   return (
     <div className="dashboard">
       <div className="dashboard-left">
@@ -95,11 +156,15 @@ function Dashboard({ store, onOpenProject, onQuickstart, onOpenSession }) {
         />
       </div>
       <div className="dashboard-right">
-        <div className="ds-card">Placeholder: RecentProjects</div>
-        <div className="ds-card">Placeholder: QuickstartRow</div>
+        <RecentProjects
+          projects={store.state.projects}
+          sessionsByProject={sessionsByProject}
+          onOpen={onOpenProject}
+        />
+        <QuickstartRow onPick={onQuickstart} />
       </div>
     </div>
   );
 }
 
-Object.assign(window, { Dashboard, NewProjectForm, QUICKSTART_PRESETS });
+Object.assign(window, { Dashboard, NewProjectForm, RecentProjects, QuickstartRow, QUICKSTART_PRESETS });
