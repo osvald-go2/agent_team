@@ -224,6 +224,16 @@ function App() {
   const appClass = "app " + (settings.density !== "default" ? densityClass : "") + (page === "chat" && rightCollapsed ? " right-collapsed" : "");
   const appStyle = page === "chat" && !rightCollapsed ? { "--right-w": rightW + "px" } : undefined;
 
+  const approvalsCount = currentProjectId
+    ? store.state.approvals.filter(a => {
+        const s = store.state.sessions.find(x => x.id === a.sessionId);
+        return s && s.projectId === currentProjectId && (a.status === "pending" || !a.status);
+      }).length
+    : null;
+  const sessionsCount = currentProjectId
+    ? store.state.sessions.filter(s => s.projectId === currentProjectId && s.status !== "archived").length
+    : null;
+
   return (
     <div className={appClass} style={appStyle} data-screen-label={"App/" + page}>
       <Topbar
@@ -239,7 +249,7 @@ function App() {
         onNewProject={() => { setPage("dashboard"); }}
         onNewSession={() => { if (currentProjectId) { const id = store.createSession(currentProjectId, {}); switchSession(id); } }}
       />
-      <Sidebar page={page} setPage={setPage} />
+      <Sidebar page={page} setPage={setPage} counts={{ approvals: approvalsCount, sessions: sessionsCount }} />
 
       {page === "chat" && (
         <>

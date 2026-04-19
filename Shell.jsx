@@ -35,7 +35,7 @@ function CrumbPopover({ label, items, onPick, onNew, newLabel }) {
 const NAV = [
   { section: "WORKSPACE", items: [
     { id: "chat", label: "Main Session", icon: "chat", live: true },
-    { id: "approvals", label: "Approvals", icon: "flag", count: 4 },
+    { id: "approvals", label: "Approvals", icon: "flag" },
     { id: "sessions", label: "Sessions", icon: "history" },
   ]},
   { section: "LIBRARY", items: [
@@ -49,24 +49,27 @@ const NAV = [
   ]},
 ];
 
-function Sidebar({ page, setPage }) {
+function Sidebar({ page, setPage, counts }) {
   return (
     <aside className="sidebar">
       {NAV.map(sec => (
         <div className="section" key={sec.section}>
           <div className="section-label">{sec.section}</div>
-          {sec.items.map(it => (
-            <div
-              key={it.id}
-              className={"nav-item " + (page === it.id ? "active" : "")}
-              onClick={() => setPage(it.id)}
-            >
-              <Icon name={it.icon} size={15} />
-              <span>{it.label}</span>
-              {it.live && <span className="live" />}
-              {it.count != null && <span className="count">{it.count}</span>}
-            </div>
-          ))}
+          {sec.items.map(it => {
+            const n = counts?.[it.id] ?? it.count;
+            return (
+              <div
+                key={it.id}
+                className={"nav-item " + (page === it.id ? "active" : "")}
+                onClick={() => setPage(it.id)}
+              >
+                <Icon name={it.icon} size={15} />
+                <span>{it.label}</span>
+                {it.live && <span className="live" />}
+                {n != null ? <span className="count">{n}</span> : null}
+              </div>
+            );
+          })}
         </div>
       ))}
       <div className="sidebar-footer">
