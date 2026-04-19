@@ -271,12 +271,14 @@ window.AppData = (() => {
     { from: "risk-reviewer",    to: "tech-writer",      sessionId: "sess-lighthouse-01" },
   ];
   const nodePos = {
-    "prd-analyst":       { x: 8,  y: 46 },
-    "domain-architect":  { x: 30, y: 22 },
-    "data-modeler":      { x: 30, y: 70 },
-    "api-designer":      { x: 55, y: 22 },
-    "risk-reviewer":     { x: 55, y: 70 },
-    "tech-writer":       { x: 82, y: 46 },
+    "sess-lighthouse-01": {
+      "prd-analyst":       { x: 8,  y: 46 },
+      "domain-architect":  { x: 30, y: 22 },
+      "data-modeler":      { x: 30, y: 70 },
+      "api-designer":      { x: 55, y: 22 },
+      "risk-reviewer":     { x: 55, y: 70 },
+      "tech-writer":       { x: 82, y: 46 },
+    },
   };
 
   // ——— Topology presets ———
@@ -356,36 +358,38 @@ window.AppData = (() => {
 
   // Per-agent conversations (for drawer)
   const agentThreads = {
-    "prd-analyst": [
-      { role: "system", text: "Activated. Context: Lighthouse PRD v1.3, 38 pages." },
-      { role: "agent", text: "Parsed document. 24 user stories, 11 non-functionals detected." },
-      { role: "tool", tool: "doc.parse", text: "doc.parse(pdf) → 312 blocks, 27 tables, 14 figures" },
-      { role: "tool", tool: "req.extract", text: "req.extract → {stories: 24, nfrs: 11, constraints: 3}" },
-      { role: "agent", text: "Flag: §4.2 payment SLA target 99.95% conflicts with current infra tier (T2 = 99.9%)." },
-      { role: "agent", text: "Handing off structured requirements to Domain Architect and Data Modeler." },
-    ],
-    "domain-architect": [
-      { role: "system", text: "Activated. Input: requirements.structured.json from PRD Analyst." },
-      { role: "agent", text: "Mapping capabilities to bounded contexts…" },
-      { role: "tool", tool: "kb.search", text: "kb.search('payments bounded context') → 8 hits in kb-existing-arch" },
-      { role: "tool", tool: "ref.adr", text: "ref.adr('outbox') → ADR-0041, ADR-0063" },
-      { role: "agent", text: "Proposing 4 contexts: Payments, Ledger, Notification, Identity with event-driven integration." },
-      { role: "agent", text: "Awaiting user decision on sync vs async payment confirmation before finalizing." },
-    ],
-    "data-modeler": [
-      { role: "system", text: "Activated. Input: 11 NFRs, SLA 99.95% for payments." },
-      { role: "agent", text: "Drafting 3 partitioning strategies for Transactions (by tenant, by month, hybrid)." },
-      { role: "tool", tool: "capacity.est", text: "capacity.est → peak 4,200 tx/s, 180GB/month" },
-    ],
-    "api-designer": [
-      { role: "system", text: "Queued. Waiting on bounded context confirmation." },
-    ],
-    "risk-reviewer": [
-      { role: "system", text: "Queued. Waiting on arch + API drafts." },
-    ],
-    "tech-writer": [
-      { role: "system", text: "Queued. Will assemble once inputs are ready." },
-    ],
+    "sess-lighthouse-01": {
+      "prd-analyst": [
+        { role: "system", text: "Activated. Context: Lighthouse PRD v1.3, 38 pages." },
+        { role: "agent", text: "Parsed document. 24 user stories, 11 non-functionals detected." },
+        { role: "tool", tool: "doc.parse", text: "doc.parse(pdf) → 312 blocks, 27 tables, 14 figures" },
+        { role: "tool", tool: "req.extract", text: "req.extract → {stories: 24, nfrs: 11, constraints: 3}" },
+        { role: "agent", text: "Flag: §4.2 payment SLA target 99.95% conflicts with current infra tier (T2 = 99.9%)." },
+        { role: "agent", text: "Handing off structured requirements to Domain Architect and Data Modeler." },
+      ],
+      "domain-architect": [
+        { role: "system", text: "Activated. Input: requirements.structured.json from PRD Analyst." },
+        { role: "agent", text: "Mapping capabilities to bounded contexts…" },
+        { role: "tool", tool: "kb.search", text: "kb.search('payments bounded context') → 8 hits in kb-existing-arch" },
+        { role: "tool", tool: "ref.adr", text: "ref.adr('outbox') → ADR-0041, ADR-0063" },
+        { role: "agent", text: "Proposing 4 contexts: Payments, Ledger, Notification, Identity with event-driven integration." },
+        { role: "agent", text: "Awaiting user decision on sync vs async payment confirmation before finalizing." },
+      ],
+      "data-modeler": [
+        { role: "system", text: "Activated. Input: 11 NFRs, SLA 99.95% for payments." },
+        { role: "agent", text: "Drafting 3 partitioning strategies for Transactions (by tenant, by month, hybrid)." },
+        { role: "tool", tool: "capacity.est", text: "capacity.est → peak 4,200 tx/s, 180GB/month" },
+      ],
+      "api-designer": [
+        { role: "system", text: "Queued. Waiting on bounded context confirmation." },
+      ],
+      "risk-reviewer": [
+        { role: "system", text: "Queued. Waiting on arch + API drafts." },
+      ],
+      "tech-writer": [
+        { role: "system", text: "Queued. Will assemble once inputs are ready." },
+      ],
+    },
   };
 
   const approvals = [
