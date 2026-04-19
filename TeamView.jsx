@@ -639,7 +639,7 @@ function TeamView({ view, setView, agents, tasks, edges, nodePos, topologies,
         {view === "kanban" && <Kanban tasks={tasks} agents={agents}
           onSelectAgent={onSelectAgent} onSelectTask={onSelectTask} store={store} />}
         {view === "canvas" && <Canvas agents={agents} topologies={topologies} onSelectAgent={onSelectAgent} selectedId={selectedId} />}
-        {view === "roster" && <Roster agents={agents} tasks={tasks} threads={window.AppData?.agentThreads || {}} onSelectAgent={onSelectAgent} store={store} />}
+        {view === "roster" && <Roster agents={agents} tasks={tasks} threads={window.AppData?.agentThreads?.["sess-lighthouse-01"] || {}} onSelectAgent={onSelectAgent} store={store} />}
       </div>
     </div>
   );

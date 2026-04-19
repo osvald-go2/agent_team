@@ -144,8 +144,9 @@ function App() {
     window.parent.postMessage({ type: "__edit_mode_set_keys", edits: next }, "*");
   };
 
+  const LIGHTHOUSE_SESSION_ID = "sess-lighthouse-01"; // TEMP until Chunk 2 introduces currentSessionId
   const selectedAgent = selectedAgentId ? store.state.agents.find(a => a.id === selectedAgentId) : null;
-  const selectedThread = selectedAgentId ? (D.agentThreads[selectedAgentId] || []) : [];
+  const selectedThread = selectedAgentId ? (D.agentThreads[LIGHTHOUSE_SESSION_ID]?.[selectedAgentId] || []) : [];
   const selectedTasks = selectedAgentId ? store.state.tasks.filter(t => t.agent === selectedAgentId) : [];
   const selectedTask = selectedTaskId ? store.state.tasks.find(t => t.id === selectedTaskId) : null;
   const selectedTaskAgent = selectedTask ? store.state.agents.find(a => a.id === selectedTask.agent) : null;
@@ -186,7 +187,7 @@ function App() {
                 agents={store.state.agents}
                 tasks={store.state.tasks}
                 edges={D.edges}
-                nodePos={D.nodePos}
+                nodePos={D.nodePos[LIGHTHOUSE_SESSION_ID] || {}}
                 topologies={D.topologies}
                 onSelectAgent={setSelectedAgentId}
                 onSelectTask={setSelectedTaskId}

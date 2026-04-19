@@ -198,7 +198,7 @@ function TaskTab({ task, store }) {
 }
 
 function ChatTab({ task, agent, localMsgs }) {
-  const historical = (window.AppData?.agentThreads?.[task.agent]) || [];
+  const historical = (window.AppData?.agentThreads?.[task.sessionId]?.[task.agent]) || [];
   const seeded = historical.map((m, i) => ({
     ...m,
     id: m.id || `hist-${i}`,
