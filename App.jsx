@@ -70,6 +70,72 @@ function App() {
   };
   const backToList = () => setDetail(null);
   const [rightView, setRightView] = React.useState(() => localStorage.getItem("at.right") || "kanban");
+
+  // Resolve a valid (projectId, sessionId) pair from candidates, falling back through the spec's 3-tier rules.
+  const resolveProjectSession = (candProj, candSess) => {
+    const sessions = store.state.sessions;
+    const projects = store.state.projects;
+    // tier 1: candidate session still exists
+    const s1 = sessions.find(x => x.id === candSess);
+    if (s1) return { projectId: s1.projectId, sessionId: s1.id };
+    // tier 2: candidate project's most-recent session
+    const projSess = sessions.find(x => x.projectId === candProj);
+    if (projSess) return { projectId: candProj, sessionId: projSess.id };
+    // tier 3: first project's most-recent session
+    const anyProj = projects[0];
+    if (anyProj) {
+      const anySess = sessions.find(x => x.projectId === anyProj.id);
+      if (anySess) return { projectId: anyProj.id, sessionId: anySess.id };
+    }
+    return { projectId: null, sessionId: null };
+  };
+
+  const [{ currentProjectId, currentSessionId }, setCurrent] = React.useState(() => {
+    const candProj = localStorage.getItem("at.projectId");
+    const candSess = localStorage.getItem("at.sessionId");
+    // Resolver can't run here (store state not ready in useState initializer); use rough restore,
+    // then the effect below corrects stale ids.
+    return { currentProjectId: candProj, currentSessionId: candSess };
+  });
+
+  React.useEffect(() => {
+    const { projectId, sessionId } = resolveProjectSession(currentProjectId, currentSessionId);
+    if (projectId !== currentProjectId || sessionId !== currentSessionId) {
+      setCurrent({ currentProjectId: projectId, currentSessionId: sessionId });
+    }
+    // eslint-disable-next-line — intentional: run once after store seeds; stable in prototype
+  }, [store.state.projects, store.state.sessions]);
+
+  React.useEffect(() => {
+    if (currentProjectId) localStorage.setItem("at.projectId", currentProjectId);
+    else localStorage.removeItem("at.projectId");
+  }, [currentProjectId]);
+  React.useEffect(() => {
+    if (currentSessionId) localStorage.setItem("at.sessionId", currentSessionId);
+    else localStorage.removeItem("at.sessionId");
+  }, [currentSessionId]);
+
+  const switchSession = (sessionId) => {
+    const sess = store.state.sessions.find(x => x.id === sessionId);
+    if (!sess) return;
+    setCurrent({ currentProjectId: sess.projectId, currentSessionId: sess.id });
+    setSelectedAgentId(null);
+    setSelectedTaskId(null);
+    setPage("chat");
+  };
+
+  const switchProject = (projectId) => {
+    const sess = store.state.sessions.find(x => x.projectId === projectId);
+    if (!sess) {
+      setCurrent({ currentProjectId: projectId, currentSessionId: null });
+      setSelectedAgentId(null);
+      setSelectedTaskId(null);
+      setPage("chat");
+      return;
+    }
+    switchSession(sess.id);
+  };
+
   const [selectedAgentId, setSelectedAgentId] = React.useState(null);
   const [selectedTaskId, setSelectedTaskId] = React.useState(null);
   const [tweaksOpen, setTweaksOpen] = React.useState(false);
@@ -144,10 +210,12 @@ function App() {
     window.parent.postMessage({ type: "__edit_mode_set_keys", edits: next }, "*");
   };
 
-  const LIGHTHOUSE_SESSION_ID = "sess-lighthouse-01"; // TEMP until Chunk 2 introduces currentSessionId
+  const slice = sliceBySession(D, store, currentSessionId);
   const selectedAgent = selectedAgentId ? store.state.agents.find(a => a.id === selectedAgentId) : null;
-  const selectedThread = selectedAgentId ? (D.agentThreads[LIGHTHOUSE_SESSION_ID]?.[selectedAgentId] || []) : [];
-  const selectedTasks = selectedAgentId ? store.state.tasks.filter(t => t.agent === selectedAgentId) : [];
+  const selectedThread = (selectedAgentId && currentSessionId)
+    ? (D.agentThreads[currentSessionId]?.[selectedAgentId] || [])
+    : [];
+  const selectedTasks = selectedAgentId ? slice.tasks.filter(t => t.agent === selectedAgentId) : [];
   const selectedTask = selectedTaskId ? store.state.tasks.find(t => t.id === selectedTaskId) : null;
   const selectedTaskAgent = selectedTask ? store.state.agents.find(a => a.id === selectedTask.agent) : null;
   const closeTaskDrawer = React.useCallback(() => setSelectedTaskId(null), []);
@@ -166,7 +234,7 @@ function App() {
           <main className="main" data-screen-label="01 Main Chat">
             <ChatArea
               onSelectAgent={setSelectedAgentId}
-              conversation={D.conversation}
+              conversation={slice.conversation}
               agents={D.agents}
               templates={D.templates}
             />
@@ -185,15 +253,16 @@ function App() {
                 view={rightView}
                 setView={setRightView}
                 agents={store.state.agents}
-                tasks={store.state.tasks}
-                edges={D.edges}
-                nodePos={D.nodePos[LIGHTHOUSE_SESSION_ID] || {}}
+                tasks={slice.tasks}
+                edges={slice.edges}
+                nodePos={slice.nodePos}
                 topologies={D.topologies}
                 onSelectAgent={setSelectedAgentId}
                 onSelectTask={setSelectedTaskId}
                 selectedId={selectedAgentId}
                 onCollapse={() => setRightCollapsed(true)}
                 store={store}
+                currentSessionId={currentSessionId}
               />
             </>
           )}
