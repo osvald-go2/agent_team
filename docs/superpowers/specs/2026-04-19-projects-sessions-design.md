@@ -89,12 +89,21 @@ Two-column layout, left 420px fixed, right flex:
 - User clicks `SessionName ▾` → popover → clicks target session →
   `setCurrentSessionId(id)` + ensures `page="chat"`.
 - Chat, Kanban, Canvas, Approvals all re-read from the new session's slice
-  (see §5.4).
+  (see §5.5).
 - Switching project auto-selects that project's most-recent session; if none
   exist, stays on `chat` and renders an empty-session placeholder inviting
   user to create the first session.
 - All sessions remain live-editable regardless of `status`; there is no
   read-only mode in this spec.
+- **What resets on session switch:** `selectedAgentId`, `selectedTaskId`
+  (clear — they reference agent/task state of the previous session's drawer
+  context). **What persists:** `rightView` (kanban/canvas/roster mode),
+  `rightW` (panel width), `rightCollapsed`, composer draft text.
+- **Stale `at.sessionId` on load:** if the restored sessionId does not
+  resolve to an existing session (cascade-deleted since last run, seed data
+  changed), fall back to current project's most-recent session. If current
+  project also doesn't resolve, fall back to the first project's most-recent
+  session. If no projects exist, navigate to Dashboard.
 
 ### 4.4 Chat area visuals
 
@@ -150,12 +159,16 @@ Lives in `Dashboard.jsx` as a module-level constant (not in AppData):
 
 ```js
 const QUICKSTART_PRESETS = [
-  { id: "qs-prd",     name: "PRD → 技术方案",    icon: "doc-code", defaultTemplateId: "tpl-prd2tech",  description: "..." },
-  { id: "qs-rca",     name: "事故 RCA 复盘",     icon: "alert",    defaultTemplateId: "tpl-rca",        description: "..." },
-  { id: "qs-compete", name: "竞品分析 Matrix",   icon: "grid",     defaultTemplateId: "tpl-research",   description: "..." },
-  { id: "qs-launch",  name: "功能 Launch Plan",  icon: "rocket",   defaultTemplateId: "tpl-gtm",        description: "..." },
+  { id: "qs-prd",     name: "PRD → 技术方案",    icon: "doc-code", defaultTemplateId: "tpl-prd2tech", description: "..." },
+  { id: "qs-bugfix",  name: "Bug 根因与修复",    icon: "alert",    defaultTemplateId: "tpl-bugfix",   description: "..." },
+  { id: "qs-compete", name: "竞品分析 Matrix",   icon: "grid",     defaultTemplateId: "tpl-research", description: "..." },
+  { id: "qs-launch",  name: "功能 Launch Plan",  icon: "rocket",   defaultTemplateId: "tpl-launch",   description: "..." },
 ];
 ```
+
+All four `defaultTemplateId` values map to templates that already exist in
+`data.js` (`tpl-prd2tech`, `tpl-bugfix`, `tpl-research`, `tpl-launch`). No
+new templates are added by this spec.
 
 ### 5.4 App state (`App.jsx`)
 
@@ -176,7 +189,7 @@ A pure helper in `CrudUI.jsx`:
 ```js
 function sliceBySession(D, store, sessionId) {
   return {
-    conversation: D.conversation.filter(m => m.sessionId === sessionId),
+    conversation: store.state.conversation.filter(m => m.sessionId === sessionId),
     tasks:        store.state.tasks.filter(t => t.sessionId === sessionId),
     edges:        D.edges.filter(e => e.sessionId === sessionId),
     nodePos:      D.nodePos[sessionId] || {},
@@ -184,6 +197,11 @@ function sliceBySession(D, store, sessionId) {
   };
 }
 ```
+
+`conversation` is moved to `store.state` (seeded once from `D.conversation`)
+so new sessions can append a seeded greeting without mutating `window.AppData`.
+`edges` and `nodePos` remain on `D` — they are read-only in the current
+code and this spec doesn't add mutation for them.
 `App.jsx` computes this once per render and passes the slice fields to
 `ChatArea`, `TeamView`, `AgentDrawer` — existing prop signatures are
 preserved, data source is narrowed.
@@ -198,13 +216,26 @@ add helpers with side-effects:
   greeting conversation message seeded), returns `{ projectId, sessionId }`.
 - `createSession(projectId, { name })` → inserts session with empty
   conversation/tasks/edges and empty `nodePos[sessionId]`, returns
-  `sessionId`.
+  `sessionId`. The seeded system greeting message (e.g. `Team ready — how
+  can I help with this session?`) is appended to the **store-owned**
+  `conversation` slice (`store.state.conversation`), not `window.AppData`.
+  Accordingly, §5.5 `sliceBySession` and §6 `CrudUI.jsx` must move
+  `conversation` from `D.conversation` to `store.state.conversation`
+  (seeded once from `D.conversation` in `useEntityStore`, then mutated for
+  new sessions). This mirrors how `tasks` and `approvals` are already
+  handled.
 - `archiveProject(id)` / `archiveSession(id)` → flips status.
 - `renameProject(id, name)` / `renameSession(id, name)`.
 - `deleteProject(id)` → cascades: deletes sessions in project, plus
   conversation/tasks/edges/approvals rows with those session ids, plus
-  `nodePos[sessionId]` entries.
+  `nodePos[sessionId]` and `agentThreads[sessionId]` entries.
 - `deleteSession(id)` → same cascade, minus project.
+
+**Cascade ordering:** because all collections are flat arrays keyed by id
+and all writes go through a single `setState` on the entity store, the
+order in which child collections are filtered out does not matter — each
+mutation is independent. The implementer can filter in any order within a
+single state update.
 
 Standard `create/update/remove/duplicate` for `projects` and `sessions` are
 not exposed through the generic `useCrud` drawer because these need the
@@ -214,15 +245,18 @@ cascade logic above.
 
 | File | Change |
 |---|---|
-| `data.js` | Add `projects`, `sessions`. Add `sessionId` to every `conversation`/`tasks`/`edges`/`approvals` record. Restructure `nodePos` and `agentThreads`. Convert the existing 7-row `history` array into sessions distributed across 3-4 mock projects; `Lighthouse` becomes the first session of `proj-lighthouse`. Drop `history` export. |
-| `Shell.jsx` | Rewrite `Sidebar` WORKSPACE section (rename History→Sessions, keep Main Session). Rewrite `Topbar` crumb with 🏠 icon + two popover dropdowns (new `<CrumbPopover>` component in this file). |
-| `App.jsx` | Add `currentProjectId` / `currentSessionId` state + localStorage effects. Add `page="dashboard"` branch. Compute slice via `sliceBySession`; thread slice fields into `ChatArea` / `TeamView`. Adjust existing effects that referenced global `D.conversation` etc. |
-| `CrudUI.jsx` | Seed new entities; implement project/session helpers with cascades; export `sliceBySession`. |
+| `data.js` | Add `projects`, `sessions`. Add `sessionId` to every `conversation`/`tasks`/`edges`/`approvals` record. Restructure `nodePos` to `{[sessionId]: {[agentId]: pos}}` and `agentThreads` to `{[sessionId]: {[agentId]: [...]}}`. Convert the existing 7-row `history` array into sessions distributed across 3-4 mock projects; `Lighthouse` becomes the first session of `proj-lighthouse`. Drop `history` from the returned object. |
+| `Shell.jsx` | Rewrite `Sidebar` WORKSPACE section (rename History→Sessions, keep Main Session). Rewrite `Topbar` crumb with 🏠 icon + two popover dropdowns (new `<CrumbPopover>` component in this file). Accept `projectName` / `sessionName` props instead of hard-coded `sessionName="Lighthouse"`. |
+| `App.jsx` | Add `currentProjectId` / `currentSessionId` state + localStorage effects + stale-id fallback (§4.3). Add `page="dashboard"` branch. Compute slice via `sliceBySession`; thread slice fields into `ChatArea` / `TeamView`. Update the `selectedThread` computation at `App.jsx:148` from `D.agentThreads[selectedAgentId]` to `D.agentThreads[currentSessionId]?.[selectedAgentId] || []`. Replace hard-coded `sessionName="Lighthouse"` at line 160 with looked-up session/project names. |
+| `CrudUI.jsx` | Replace `history: [...D.history]` seed with `projects: [...D.projects]`, `sessions: [...D.sessions]`, and `conversation: [...D.conversation]` (new — moved from AppData into the store so new sessions can append a seeded greeting). Implement project/session helpers with cascades; export `sliceBySession`. |
 | `Dashboard.jsx` *(new)* | `Dashboard` component + `NewProjectForm` + `RecentProjects` + `QuickstartRow`. Constant `QUICKSTART_PRESETS`. Attach to `window`. |
 | `Chat.jsx` | Replace `MessageBubble` implementation with borderless label+body rows and chip support. Add `InlineNotice`. Redesign `Composer` icon strip + Send button. Business cards unchanged. |
-| `styles.css` | Styles for new message layout, chips, InlineNotice, crumb popover, Dashboard two-column layout, Quickstart row, recent-project cards. Bump `?v=` in `index.html`. |
-| `index.html` | Add `<script type="text/babel" src="Dashboard.jsx">` between `Pages.jsx` and `DetailShell.jsx` (Dashboard is a top-level page like Pages; must load before `App.jsx`). Bump `?v=` on `data.js` and `styles.css`. |
-| `Pages.jsx` | Remove `HistoryPage` (replaced by dashboard + session popover; decision: drop the standalone page — the sidebar `Sessions` item instead opens the project's session popover OR a minimal per-project sessions list view; see §8 open question). |
+| `TeamView.jsx` | `TeamView` line 642 (`Roster threads={window.AppData?.agentThreads \|\| {}}`) → thread-through sessionId: pass `threads={D.agentThreads[currentSessionId] \|\| {}}` via a new `currentSessionId` prop (or `threads` resolved in `App.jsx` and passed down). Update `Roster` `seedMessages` at line 342 to consume the already-scoped `threads` map with the same `threads[task.agent]` shape (no code change inside Roster — only its input changes). |
+| `TaskDrawer.jsx` | `ChatTab` line 201: change `window.AppData?.agentThreads?.[task.agent]` to `window.AppData?.agentThreads?.[task.sessionId]?.[task.agent]`. Requires `task` to carry `sessionId` (guaranteed by §5.2 data-model change). |
+| `AgentDrawer.jsx` | No direct read of `agentThreads` (verified). The `thread` prop is resolved in `App.jsx:148` and passed down, so the `App.jsx:148` fix above fully covers this consumer — no edit to `AgentDrawer.jsx` itself is needed. |
+| `Pages.jsx` | Remove `HistoryPage` component definition and its `window` export entry. Remove `history` case from `App.jsx` page routing. (Depends on §8 Q1 resolution — if Sessions sidebar item opens a `SessionsPage`, that component is added in its place.) |
+| `styles.css` | Styles for new message layout, chips, InlineNotice, crumb popover, Dashboard two-column layout, Quickstart row, recent-project cards. |
+| `index.html` | Add `<script type="text/babel" src="Dashboard.jsx">` after `Pages.jsx` and before `DetailShell.jsx` (Dashboard is a top-level page; no current code depends on it, and `App.jsx` is last as required). Bump `?v=` on `data.js` and `styles.css`. |
 
 ## 7. Architecture notes
 
@@ -251,6 +285,14 @@ cascade logic above.
    count, or show aggregate across all projects? Recommendation: hide
    (nothing is "current"); Main Session still works via `at.sessionId`
    fallback.
+
+3. **Scope split** — §4.4 chat visual redesign (MessageBubble / Composer /
+   InlineNotice) is logically independent of the Projects/Sessions data
+   refactor. They can ship as two separate PRs off this same spec, or be
+   rolled into one. Recommendation: keep in one spec (both were requested
+   together in the same brainstorming), but land §4.4 as an independent
+   commit series inside the implementation plan so it can be reviewed and
+   rolled back separately if needed.
 
 ## 9. Acceptance criteria
 
