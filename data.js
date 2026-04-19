@@ -311,15 +311,15 @@ window.AppData = (() => {
     sequential: {
       id: "sequential",
       name: "Sequential Pipeline",
-      subtitle: "Top→down hand-off",
-      shape: "tree",
+      subtitle: "Left→right hand-off",
+      shape: "pipeline",
       nodes: {
-        "prd-analyst":      { x: 50, y: 10, role: "Stage 1" },
-        "domain-architect": { x: 50, y: 25, role: "Stage 2" },
-        "data-modeler":     { x: 50, y: 40, role: "Stage 3" },
-        "api-designer":     { x: 50, y: 55, role: "Stage 4" },
-        "risk-reviewer":    { x: 50, y: 70, role: "Stage 5" },
-        "tech-writer":      { x: 50, y: 85, role: "Sink" },
+        "prd-analyst":      { x: 8,  y: 50, role: "Stage 1" },
+        "domain-architect": { x: 26, y: 50, role: "Stage 2" },
+        "data-modeler":     { x: 44, y: 50, role: "Stage 3" },
+        "api-designer":     { x: 62, y: 50, role: "Stage 4" },
+        "risk-reviewer":    { x: 80, y: 50, role: "Stage 5" },
+        "tech-writer":      { x: 94, y: 50, role: "Sink" },
       },
       edges: [
         ["prd-analyst", "domain-architect"],
