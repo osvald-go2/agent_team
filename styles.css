@@ -2672,3 +2672,7 @@ input[type="text"], input[type="number"], input[type="password"], textarea, sele
 .msg-body { font-size: 14px; line-height: 1.65; color: var(--text-1); white-space: pre-wrap; }
 .msg-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 2px; }
 .chip { font-size: 11.5px; padding: 3px 8px; border-radius: 999px; background: var(--bg-2); color: var(--text-2); border: 1px solid var(--border-1); }
+
+.inline-notice { display: inline-flex; align-items: center; gap: 8px; padding: 8px 12px; border-radius: 8px; background: var(--accent-1-bg, rgba(224,133,88,0.08)); border: 1px solid var(--border-1); color: var(--text-2); font-size: 12.5px; }
+.in-text { flex: 1; }
+.in-action { background: transparent; border: 0; color: var(--accent-1); cursor: pointer; font: inherit; font-weight: 500; }

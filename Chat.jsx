@@ -412,4 +412,14 @@ function ChatArea({ onSelectAgent, conversation, agents, templates, forceEmpty, 
   );
 }
 
-Object.assign(window, { ChatArea, AgentBadge });
+function InlineNotice({ icon = "info", children, action, onAction }) {
+  return (
+    <div className="inline-notice">
+      <Icon name={icon} size={13} />
+      <span className="in-text">{children}</span>
+      {action && <button className="in-action" onClick={onAction}>{action} →</button>}
+    </div>
+  );
+}
+
+Object.assign(window, { ChatArea, AgentBadge, InlineNotice });
