@@ -303,15 +303,15 @@ window.AppData = (() => {
     sequential: {
       id: "sequential",
       name: "Sequential Pipeline",
-      subtitle: "Left→right hand-off",
-      shape: "pipeline",
+      subtitle: "Top→down hand-off",
+      shape: "tree",
       nodes: {
-        "prd-analyst":      { x: 8,  y: 50, role: "Stage 1" },
-        "domain-architect": { x: 26, y: 50, role: "Stage 2" },
-        "data-modeler":     { x: 44, y: 50, role: "Stage 3" },
-        "api-designer":     { x: 62, y: 50, role: "Stage 4" },
-        "risk-reviewer":    { x: 80, y: 50, role: "Stage 5" },
-        "tech-writer":      { x: 94, y: 50, role: "Sink" },
+        "prd-analyst":      { x: 50, y: 10, role: "Stage 1" },
+        "domain-architect": { x: 50, y: 25, role: "Stage 2" },
+        "data-modeler":     { x: 50, y: 40, role: "Stage 3" },
+        "api-designer":     { x: 50, y: 55, role: "Stage 4" },
+        "risk-reviewer":    { x: 50, y: 70, role: "Stage 5" },
+        "tech-writer":      { x: 50, y: 85, role: "Sink" },
       },
       edges: [
         ["prd-analyst", "domain-architect"],
@@ -401,5 +401,71 @@ window.AppData = (() => {
     { id: "h7", name: "Checkout perf audit", when: "1w ago", status: "done", agents: 4, turns: 16, duration: "36m" },
   ];
 
-  return { agents, skills, knowledge, templates, conversation, tasks, edges, nodePos, topologies, agentThreads, approvals, history };
+  const projects = [
+    {
+      id: "proj-lighthouse",
+      name: "Lighthouse",
+      description: "Core PRD → Technical Design workstream.",
+      icon: "cube",
+      color: "oklch(0.75 0.12 40)",
+      defaultTemplateId: "tpl-prd2tech",
+      status: "active",
+      created: "2026-04-10",
+      lastActive: "Now",
+    },
+    {
+      id: "proj-ai-report",
+      name: "AI Report Templates",
+      description: "AI-assisted reporting template library.",
+      icon: "doc-code",
+      color: "oklch(0.72 0.13 230)",
+      defaultTemplateId: "tpl-data",
+      status: "active",
+      created: "2026-04-12",
+      lastActive: "Yesterday",
+    },
+    {
+      id: "proj-pricing",
+      name: "Pricing v2 GTM",
+      description: "Pricing redesign go-to-market plan.",
+      icon: "grid",
+      color: "oklch(0.72 0.13 150)",
+      defaultTemplateId: "tpl-launch",
+      status: "active",
+      created: "2026-04-05",
+      lastActive: "2d ago",
+    },
+    {
+      id: "proj-outage",
+      name: "P0 Outage Reviews",
+      description: "Post-mortem and RCA workstream.",
+      icon: "alert",
+      color: "oklch(0.68 0.15 25)",
+      defaultTemplateId: "tpl-bugfix",
+      status: "active",
+      created: "2026-03-28",
+      lastActive: "1w ago",
+    },
+  ];
+
+  const sessions = [
+    // proj-lighthouse — the currently running session keeps the old name/id pattern
+    { id: "sess-lighthouse-01", projectId: "proj-lighthouse", name: "Lighthouse — PRD to Tech Design", status: "running", agents: 6, turns: 14, duration: "12m", when: "Now",       createdBy: "Lin Chen" },
+    { id: "sess-lighthouse-02", projectId: "proj-lighthouse", name: "Mobile auth refactor review",     status: "idle",    agents: 4, turns: 11, duration: "41m", when: "2d ago",   createdBy: "Lin Chen" },
+
+    // proj-ai-report
+    { id: "sess-ai-01", projectId: "proj-ai-report", name: "Q1 earnings report draft", status: "idle",     agents: 3, turns: 9, duration: "28m", when: "Yesterday", createdBy: "Lin Chen" },
+    { id: "sess-ai-02", projectId: "proj-ai-report", name: "Weekly status digest",     status: "archived", agents: 3, turns: 7, duration: "21m", when: "1w ago",    createdBy: "Lin Chen" },
+
+    // proj-pricing
+    { id: "sess-pricing-01", projectId: "proj-pricing", name: "Pricing v2 — GTM Launch plan", status: "idle",     agents: 4, turns: 22, duration: "1h 04m", when: "Yesterday", createdBy: "Lin Chen" },
+    { id: "sess-pricing-02", projectId: "proj-pricing", name: "Competitor matrix Q2",         status: "idle",     agents: 5, turns: 18, duration: "52m",    when: "3d ago",    createdBy: "Lin Chen" },
+    { id: "sess-pricing-03", projectId: "proj-pricing", name: "Checkout perf audit",          status: "idle",     agents: 4, turns: 16, duration: "36m",    when: "1w ago",    createdBy: "Lin Chen" },
+
+    // proj-outage
+    { id: "sess-outage-01", projectId: "proj-outage", name: "P0 Outage — RCA draft", status: "idle",     agents: 3, turns: 9, duration: "28m", when: "Yesterday", createdBy: "Lin Chen" },
+    { id: "sess-outage-02", projectId: "proj-outage", name: "Data model — Billing v3", status: "archived", agents: 3, turns: 4, duration: "8m",  when: "5d ago",    createdBy: "Lin Chen" },
+  ];
+
+  return { agents, skills, knowledge, templates, projects, sessions, conversation, tasks, edges, nodePos, topologies, agentThreads, approvals, history };
 })();
