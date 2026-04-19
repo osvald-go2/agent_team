@@ -329,4 +329,21 @@ function EntityDrawer({ open, mode, title, subtitle, fields, value, onClose, onS
   );
 }
 
-Object.assign(window, { useEntityStore, RowMenu, ConfirmDialog, EntityDrawer, Field });
+/* ——— sliceBySession —————————————————————————————————————————
+ * Derive a per-session view of all per-session collections.
+ * Chunk 1 installs it; Chunk 2 wires consumers.
+ */
+function sliceBySession(D, store, sessionId) {
+  if (!sessionId) {
+    return { conversation: [], tasks: [], edges: [], nodePos: {}, approvals: [] };
+  }
+  return {
+    conversation: store.state.conversation.filter(m => m.sessionId === sessionId),
+    tasks:        store.state.tasks.filter(t => t.sessionId === sessionId),
+    edges:        D.edges.filter(e => e.sessionId === sessionId),
+    nodePos:      D.nodePos[sessionId] || {},
+    approvals:    store.state.approvals.filter(a => a.sessionId === sessionId),
+  };
+}
+
+Object.assign(window, { useEntityStore, RowMenu, ConfirmDialog, EntityDrawer, Field, sliceBySession });
