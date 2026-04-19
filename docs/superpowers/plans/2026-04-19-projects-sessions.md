@@ -351,7 +351,7 @@ git commit -m "refactor: scope agentThreads and nodePos reads to sess-lighthouse
 **Files:**
 - Modify: `CrudUI.jsx` (`useEntityStore` around line 10)
 
-- [ ] **Step 1: Replace the initial state object.**
+- [ ] **Step 1: Replace the initial state object (keep `history` alongside, temporarily).**
 
 Before:
 
@@ -380,14 +380,19 @@ const [state, setState] = React.useState(() => ({
   approvals:    [...D.approvals],
   tasks:        [...D.tasks],
   conversation: [...D.conversation],
+  history:      [...D.history],   // TEMP — retained until Task 14 deletes HistoryPage and the history array
 }));
 ```
 
-- [ ] **Step 2: Remove `HistoryPage` consumers of `store.state.history`.**
+**Why keep `history` for now:** `Pages.jsx:454` does `store.state.history` and `useCrud("history", store)`. If you drop the slice now, clicking Sessions in the sidebar (which Task 9 routes to `HistoryPage` as a stopgap) throws. Task 14 removes both `HistoryPage` and this temporary line atomically.
 
-Run `grep -n "state.history\|state\\[\"history\"\\]\|useCrud(\"history\"" *.jsx`. Fix each hit. `Pages.jsx` `HistoryPage` and the `history` case in `App.jsx`'s `page !== "chat"` switch will need touching — either delete them (Task 14) or temporarily wire them to `store.state.sessions` so the app doesn't throw when you click the History nav item.
+- [ ] **Step 2: Verify no OTHER consumer reads `store.state.history` or calls `useCrud("history", ...)`.**
 
-Quick stopgap (to be cleaned up in Task 14): in `Pages.jsx` `HistoryPage`, replace reads of `store.state.history` with `store.state.sessions`. The fields mostly align.
+```bash
+grep -rn 'state\.history\|useCrud("history"' *.jsx
+```
+
+Expected exactly two hits: `Pages.jsx:454` and `Pages.jsx:455`. If the grep returns more, list them — any new consumer needs the same stopgap treatment until Task 14.
 
 - [ ] **Step 3: Hard-reload and verify.**
 
@@ -595,6 +600,46 @@ git commit -m "feat: add createProject/createSession/archive/rename/delete store
 
 ---
 
+## Chunk 1b: Add missing icon paths
+
+`icons.jsx` currently has these: `scan, layers, plug, database, shield, pen, chat, board, graph, canvas, compass, bolt, book, hammer, history, check, x, dots, plus, arrow, send, play, pause, search, settings, user, paperclip, spark, doc, folder, filter, clock, flag, alert, branch, target, sliders, grid, sparkle, cube, eye, download, edit, copy, trash`.
+
+Later chunks reference these new icons: `home`, `chevron-down`, `mic`, `upload`, `rocket`, `doc-code`, `info`. Missing ones render as empty SVGs (no throw, no visible icon — silent break). Add them up-front.
+
+### Task 7b: Add seven icon paths
+
+**Files:**
+- Modify: `icons.jsx` (the `ICON_PATHS` object)
+
+- [ ] **Step 1: Append the seven entries inside `ICON_PATHS`, before the closing `};`.**
+
+```js
+  home:         ["M3 11l9-7 9 7", "M5 10v9a1 1 0 0 0 1 1h4v-6h4v6h4a1 1 0 0 0 1-1v-9"],
+  "chevron-down": ["M6 9l6 6 6-6"],
+  mic:          ["M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3z", "M5 11a7 7 0 0 0 14 0", "M12 18v3", "M9 21h6"],
+  upload:       ["M12 20V8", "M6 12l6-6 6 6", "M4 4h16"],
+  rocket:       ["M5 15a4 4 0 0 0 4 4c0-2 .5-4 2-5l5-5c3-3 4-8 4-8s-5 1-8 4l-5 5c-1 1.5-2 3-2 5z", "M9 15l-4 4", "M13 11a1 1 0 1 0 2 0 1 1 0 0 0-2 0z"],
+  "doc-code":   ["M6 2h8l6 6v14H6z", "M14 2v6h6", "M10 13l-2 2 2 2", "M14 13l2 2-2 2"],
+  info:         ["M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18z", "M12 11v5", "M12 8h.01"],
+```
+
+Note: keys containing hyphens must be quoted (`"chevron-down"`, `"doc-code"`).
+
+- [ ] **Step 2: Hard-reload and verify.**
+
+The app will not yet consume these icons. Open the React DevTools component tree or just `<Icon name="home" size={16} />` by editing any visible component temporarily to confirm the SVG renders. Revert the experiment.
+
+A lighter check: `grep -n "home:\|chevron-down\|mic:\|upload:\|rocket:\|doc-code\|info:" icons.jsx` — all seven should hit.
+
+- [ ] **Step 3: Commit.**
+
+```bash
+git add icons.jsx
+git commit -m "icons: add home, chevron-down, mic, upload, rocket, doc-code, info"
+```
+
+---
+
 ## Chunk 2: Session switching state & navigation
 
 At the end of this chunk the user can switch projects and sessions via the Topbar crumb popovers, data slicing works, and the Sidebar WORKSPACE is renamed.
@@ -676,6 +721,20 @@ const switchProject = (projectId) => {
 };
 ```
 
+- [ ] **Step 1b: Remove every `"sess-lighthouse-01"` literal introduced as a stopgap in Chunk 1 Task 4.**
+
+Run:
+```bash
+grep -rn 'sess-lighthouse-01' *.jsx
+```
+
+Every hit should be replaced with the in-scope `currentSessionId` value. Specifically:
+- `App.jsx` — delete the `const LIGHTHOUSE_SESSION_ID = ...` line and use `currentSessionId` directly in the `selectedThread` computation (Step 2 below supersedes it entirely).
+- `TeamView.jsx:642` — replace the literal with the new `currentSessionId` prop (wired in Step 3 below).
+- `Canvas` reads of `D.nodePos["sess-lighthouse-01"]?.[...]` — replace with `nodePos[...]` where `nodePos` is already the slice value (from `slice.nodePos` threaded in Step 2 below).
+
+After this step no source file should contain the string `sess-lighthouse-01` (except `data.js` where the seed literal lives, which is correct).
+
 - [ ] **Step 2: Compute slice and thread it into consumers.**
 
 Just before the `return` of `App`, add:
@@ -735,7 +794,7 @@ git commit -m "feat: currentProjectId/currentSessionId state with resolver + swi
 ### Task 9: Rename sidebar `History` to `Sessions`, keep `Main Session`
 
 **Files:**
-- Modify: `Shell.jsx` (`NAV` constant and sidebar rendering)
+- Modify: `Shell.jsx` (`NAV` constant only — `crumbMap` is entirely rewritten in Task 10, so don't touch it here)
 
 - [ ] **Step 1: Update the `NAV` constant.**
 
@@ -749,27 +808,23 @@ Change the WORKSPACE section:
 ]},
 ```
 
-(The `count` will be computed dynamically in Task 19; leave static/empty for now.)
+(The `count` will be computed dynamically in Task 18; leave static/empty for now.)
 
-- [ ] **Step 2: Update the `crumbMap` in `Topbar` to handle `sessions`.**
+- [ ] **Step 2: Update `App.jsx` routing so `page === "sessions"` renders something.**
 
-Add a `sessions: ["Workspace", "Sessions"]` entry. Remove or keep `history` for compatibility during the transition (safer to keep until Task 14).
-
-- [ ] **Step 3: Update `App.jsx` routing so `page === "sessions"` renders something.**
-
-Temporarily route it to the existing `HistoryPage` (which already reads from sessions after Task 5). We'll swap in a proper `SessionsPage` in Task 14 per §8 Q1 (recommendation: a dedicated page).
+Temporarily route it to the existing `HistoryPage` (which already reads from `store.state.sessions` after Task 5's rename). We'll swap in a proper `SessionsPage` in Task 14 per §8 Q1 (recommendation: a dedicated page).
 
 In the `page !== "chat"` switch in `App.jsx`:
 ```jsx
 {page === "sessions" && <HistoryPage store={store} />}
 ```
-Keep the old `page === "history"` line for now (safety).
+Keep the old `page === "history"` line for now (safety — it still matches stale localStorage).
 
-- [ ] **Step 4: Hard-reload and verify.**
+- [ ] **Step 3: Hard-reload and verify.**
 
 Sidebar shows `Main Session / Approvals / Sessions` under WORKSPACE. Clicking `Sessions` opens the list (formerly History). Everything else unchanged.
 
-- [ ] **Step 5: Commit.**
+- [ ] **Step 4: Commit.**
 
 ```bash
 git add Shell.jsx App.jsx
@@ -879,11 +934,11 @@ function Topbar({ page, projectName, sessionName, projects, sessions, currentPro
 
 - [ ] **Step 3: Confirm `icons.jsx` has `home` and `chevron-down`.**
 
-Run:
+These were added in Task 7b (Chunk 1b). Sanity check:
 ```bash
-grep -n "home\\|chevron" icons.jsx
+grep -E '^  (home):|"chevron-down":' icons.jsx
 ```
-If missing, add SVG paths for them. `home` shape: classic house outline; `chevron-down`: simple `M 3 5 L 6 9 L 9 5` stroke path. Keep consistent with the existing icon style (fill or stroke — match siblings).
+Expect 2 hits. If missing, stop and revisit Task 7b.
 
 - [ ] **Step 4: Wire `App.jsx` to pass the new props.**
 
@@ -1345,6 +1400,10 @@ Resolve §8 Q1 with recommendation (b): a dedicated list page.
 - Modify: `Pages.jsx`
 - Modify: `App.jsx`
 
+- [ ] **Step 0: Also drop `history: [...D.history]` from the `useEntityStore` seed in `CrudUI.jsx` as part of this task's commit** (the temporary line added in Task 5 Step 1). After Task 14, `store.state.history` must not exist.
+
+- [ ] **Step 0b: Drop the `const history = [...]` declaration from `data.js` IIFE** (not just the `return` entry) so the array itself doesn't linger as dead data. Bump `data.js?v=7` → `?v=8`.
+
 - [ ] **Step 1: Add `SessionsPage` in `Pages.jsx`.**
 
 A minimal list scoped to current project:
@@ -1423,26 +1482,50 @@ git commit -m "refactor: replace HistoryPage with SessionsPage scoped to current
 
 ## Chunk 4: Chat area polish
 
-### Task 15: Rewrite `MessageBubble` with Claude-style labeled layout
+### Task 15: Restyle `Message` text branch to Claude-style (business cards untouched)
 
 **Files:**
-- Modify: `Chat.jsx` (the `MessageBubble` or equivalent message rendering)
+- Modify: `Chat.jsx` (function `Message` at line 102; **do not rename** — callers use `<Message />`)
 
-- [ ] **Step 1: Read the current `MessageBubble` implementation** in `Chat.jsx` to confirm its exact shape and how it decides between user/team/agent messages.
+Important: the actual component is `Message(msg, agents, onSelectAgent, onDecide)`. Its first lines look like:
 
-- [ ] **Step 2: Replace the component.**
+```js
+function Message({ msg, agents, onSelectAgent, onDecide }) {
+  if (msg.kind === "team-proposal") { /* returns a business card */ }
+  if (msg.kind === "approval")      { /* returns a business card */ }
+  const agent = msg.agent ? agents.find(a => a.id === msg.agent) : null;
+  const isUser = msg.role === "user";
+  const isSystem = msg.role === "system";
+  // ... renders the text bubble
+}
+```
+
+Only the **text bubble** (the branch after the two `msg.kind` early returns) changes. The two `if (msg.kind === ...)` early returns stay exactly as they are — those are the business cards the spec says to preserve.
+
+- [ ] **Step 1: Read the current `Message` implementation end-to-end** (lines 102 through the function's closing `}`). Note every prop it reads off `msg` (`agent`, `role`, `text`, plus any others).
+
+- [ ] **Step 2: Rewrite only the text-bubble branch.**
+
+Keep the two `if (msg.kind === ...)` returns at the top intact. Replace the rest of the function body with:
 
 ```jsx
-function MessageBubble({ msg, agents }) {
   const agent = msg.agent ? agents.find(a => a.id === msg.agent) : null;
-  const label = msg.role === "user"
+  const isUser = msg.role === "user";
+  const isSystem = msg.role === "system";
+  const roleClass = isUser ? "msg-user" : isSystem ? "msg-system" : "msg-team";
+
+  const label = isUser
     ? <span className="msg-label">You</span>
     : agent
-      ? <span className="msg-label"><AgentBadge agent={agent} size={18} /> {agent.name} <span className="msg-role">{agent.role}</span></span>
+      ? <span className="msg-label">
+          <AgentBadge agent={agent} size={18} />
+          <span>{agent.name}</span>
+          <span className="msg-role">{agent.role}</span>
+        </span>
       : <span className="msg-label">Team</span>;
 
   return (
-    <div className={"msg msg-" + (msg.role || "team")}>
+    <div className={"msg " + roleClass}>
       {label}
       {msg.text && <div className="msg-body">{msg.text}</div>}
       {msg.chips && msg.chips.length > 0 && (
@@ -1450,15 +1533,11 @@ function MessageBubble({ msg, agents }) {
           {msg.chips.map((c, i) => <span key={i} className="chip">{c}</span>)}
         </div>
       )}
-      {msg.block && <div className="msg-block">{msg.block}</div>}
     </div>
   );
-}
 ```
 
-(The exact props depend on what `conversation` records look like. If the current shape uses `from` instead of `role`, adapt. Preserve whatever existing `block`/card rendering logic was there — only the bubble wrapper is changing.)
-
-Existing business cards (`TeamProposalCard`, `ApprovalCard`, etc.) should continue to render via the `msg.block` slot. Do not touch them.
+Do NOT introduce a `msg.block` slot — it's fictional. If the current `Message` branch renders any additional sub-elements (tool output, inline chips, `onSelectAgent` interactions), preserve them inside this new layout — adapt, don't drop.
 
 - [ ] **Step 3: Add styles.**
 
@@ -1471,10 +1550,9 @@ Append to `styles.css`:
 .msg-body { font-size: 14px; line-height: 1.65; color: var(--text-1); white-space: pre-wrap; }
 .msg-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 2px; }
 .chip { font-size: 11.5px; padding: 3px 8px; border-radius: 999px; background: var(--bg-2); color: var(--text-2); border: 1px solid var(--border-1); }
-.msg-block { margin-top: 4px; }
 ```
 
-Bump `styles.css` version.
+Bump `styles.css?v=28` → `?v=29` in `index.html`.
 
 - [ ] **Step 4: Hard-reload and verify.**
 
@@ -1521,7 +1599,7 @@ Export on `window` so demo / seed messages can wrap it in a `block`.
 .in-action { background: transparent; border: 0; color: var(--accent-1); cursor: pointer; font: inherit; font-weight: 500; }
 ```
 
-Bump `styles.css` version.
+Bump `styles.css?v=29` → `?v=30` in `index.html`.
 
 - [ ] **Step 3: Seed one example.**
 
@@ -1532,6 +1610,62 @@ In `data.js` `conversation`, add a system message using `InlineNotice` by settin
 ```bash
 git add Chat.jsx styles.css index.html
 git commit -m "chat: add InlineNotice component"
+```
+
+---
+
+### Task 16b: Wire `handleSend` to append messages to `store.state.conversation`
+
+Currently `Chat.jsx` `handleSend` (around line 356) just toggles the welcome state — it does not persist the user's message. After Chunk 1, `conversation` is a store-owned slice, and new sessions seeded by Quickstart expect users to be able to send messages that survive session switches. Make `handleSend` an append-to-store.
+
+**Files:**
+- Modify: `Chat.jsx` (`ChatArea` signature + `handleSend`)
+- Modify: `App.jsx` (pass `store` and `currentSessionId` into `ChatArea`)
+
+- [ ] **Step 1: Thread `store` and `currentSessionId` into `ChatArea`.**
+
+In `App.jsx`, the `<ChatArea ... />` call already accepts several props. Add:
+
+```jsx
+<ChatArea
+  onSelectAgent={setSelectedAgentId}
+  conversation={slice.conversation}
+  agents={store.state.agents}
+  templates={store.state.templates}
+  store={store}
+  currentSessionId={currentSessionId}
+/>
+```
+
+- [ ] **Step 2: Update `ChatArea`'s signature and `handleSend`.**
+
+```jsx
+function ChatArea({ onSelectAgent, conversation, agents, templates, store, currentSessionId }) {
+  // ... existing state
+  const handleSend = (text) => {
+    if (!text?.trim() || !currentSessionId || !store) return;
+    const id = `msg-${currentSessionId}-${Date.now().toString(36)}`;
+    store.create("conversation", { id, sessionId: currentSessionId, role: "user", text: text.trim() });
+    goFull();
+  };
+  // ... rest unchanged
+}
+```
+
+`store.create("conversation", item)` exists (it's the generic entity-store `create` from `useEntityStore`). `conversation` is now a slice in `store.state` (Task 5), so `create` works without any extra helper.
+
+- [ ] **Step 3: Hard-reload and verify.**
+
+- Open Lighthouse session, type "hello world" in the composer, hit Send.
+- A new "You" bubble appears at the bottom of the chat with the text.
+- Switch to another session via the crumb popover, then switch back.
+- The "hello world" message should still be there (persisted in `store.state.conversation`).
+
+- [ ] **Step 4: Commit.**
+
+```bash
+git add Chat.jsx App.jsx
+git commit -m "chat: wire handleSend to persist user messages in store conversation"
 ```
 
 ---
@@ -1571,13 +1705,13 @@ function Composer({ placeholder = "Describe what you want to create..." }) {
 }
 ```
 
-- [ ] **Step 2: Confirm `icons.jsx` has `paperclip`, `mic`, `upload`, `send`.**
+- [ ] **Step 2: Confirm `icons.jsx` has `paperclip`, `mic`, `upload`, `send`, `sliders`.**
 
+These should all exist after Task 7b (Chunk 1b) and the base icon set. Sanity check:
 ```bash
-grep -n "paperclip\\|\"mic\"\\|\"upload\"\\|\"send\"" icons.jsx
+grep -E '^  (paperclip|send|sliders):|"(mic|upload)":' icons.jsx
 ```
-
-Add any missing ones. Keep style consistent with neighbors.
+Expect 5 hits. If any are missing, stop and revisit Task 7b.
 
 - [ ] **Step 3: Add styles.**
 
@@ -1593,7 +1727,7 @@ Add any missing ones. Keep style consistent with neighbors.
 .cmp-send[disabled] { opacity: 0.5; cursor: not-allowed; }
 ```
 
-Bump `styles.css` version.
+Bump `styles.css?v=30` → `?v=31` in `index.html`.
 
 - [ ] **Step 4: Hard-reload and verify.**
 
@@ -1668,27 +1802,54 @@ Work through every item in §9 of the spec. Fix anything that doesn't pass.
 
 **Files:** none, unless you find bugs.
 
-- [ ] **Clear localStorage (DevTools → Application → Local Storage → Clear)** and reload. Expected: lands on Dashboard with 4 mock projects and 4 Quickstart cards.
+Use the **pre-refactor baseline numbers** for regression detection. Before starting Chunk 1, the Lighthouse session had these observable counts — verify them all still match at the end:
 
-- [ ] **Click the `Lighthouse` card** → chat loads with the original Lighthouse conversation and kanban tasks. Parity with pre-Chunk-1 state.
+- `conversation` messages in Lighthouse: count the records with `role:` fields in `data.js` — call this **M_conv**. Record this number before starting Chunk 1 and re-check at Task 19.
+- `tasks` kanban rows in Lighthouse: count the records in the `tasks` array in `data.js` — call this **N_tasks**. (At time of writing, baseline appears to be roughly 7 tasks spread across kanban columns — re-count on your checkout.)
+- `approvals` pending in sidebar badge: count of approval records with `status !== "approved"` — baseline is typically **4** (matches the static `count: 4` in `Shell.jsx` `NAV`).
+- `edges` rendered in canvas: count of `edges` records.
 
-- [ ] **Topbar session popover** → lists sessions in `proj-lighthouse`. Click `Mobile auth refactor review` → chat + kanban swap.
+Tip: open `data.js` and run `grep -c 'role:' data.js` and similar before Chunk 1; write the numbers in a scratch note.
+
+Now walk through:
+
+- [ ] **Clear localStorage (DevTools → Application → Local Storage → Clear)** and reload. Expected: lands on Dashboard with 4 mock projects (Lighthouse, AI Report Templates, Pricing v2 GTM, P0 Outage Reviews) and 4 Quickstart cards.
+
+- [ ] **Click the `Lighthouse` card** → chat loads with M_conv conversation messages, kanban shows N_tasks tasks, canvas shows the edges count from baseline. Numbers must match the pre-refactor baseline exactly. Any discrepancy is a regression — fix before proceeding.
+
+- [ ] **Topbar session popover** → lists 2 sessions in `proj-lighthouse`. Click `Mobile auth refactor review` → chat + kanban swap to that session (which has no seeded content beyond the sessions metadata, so chat is empty / kanban is empty — that's expected since only `sess-lighthouse-01` was tagged in Task 2).
 
 - [ ] **Topbar project popover** → lists all 4 projects. Switching auto-selects that project's most-recent session.
 
-- [ ] **Click a Quickstart card** → new project + session created, breadcrumb shows new names, chat shows only the seeded system greeting.
+- [ ] **Click a Quickstart card (e.g. `Competitor Matrix`)** → new project + session created, breadcrumb shows the new names, chat shows exactly one seeded system greeting (the `Team ready — describe what you want to work on.` from `createProject`).
 
-- [ ] **Click 🏠** → returns to Dashboard.
+- [ ] **Click 🏠** → returns to Dashboard. The newly-created project now appears in the Recent cards.
 
-- [ ] **Sidebar Approvals count** → matches current project's pending count; changes when project changes.
+- [ ] **Sidebar Approvals count** → on Lighthouse, shows **4** (baseline). Switch to AI Report Templates — count drops to 0. Switch back — count returns to 4.
 
-- [ ] **Message body** → labeled Claude-style. **Business cards** (TeamProposalCard, ApprovalCard) still intact. **Composer** shows ⚙/📎/🎤/Import + Send.
+- [ ] **Message body** → in Lighthouse, labeled Claude-style (no bubble borders, bold "You" / agent name + role). **Business cards** (TeamProposalCard, ApprovalCard) still intact with their own card styling. **Composer** shows ⚙ / 📎 / 🎤 / Import + Send.
 
-- [ ] **Refresh** → session and project restored from localStorage.
+- [ ] **Send persistence** → type "regression test 1" in composer, hit Send. It appears as a "You" bubble. Switch to another session, switch back. The message is still there (covered by Task 16b).
 
-- [ ] **Set `at.sessionId = "bogus"` in DevTools and refresh** → app recovers via fallback.
+- [ ] **Composer draft persistence** → type "unsent draft" in composer, do NOT send. Switch sessions via the crumb popover. Switch back. Expected: draft is lost (this is acceptable per spec ambiguity; the spec lists it as "persists" but this prototype unmounts ChatArea's state on session change). **If you want draft to persist**, lift `draft` state into `App.jsx` keyed by `sessionId` — optional follow-up, not a blocker.
 
-- [ ] Fix any failure found and commit each fix separately with a descriptive message. If no fixes needed, skip to Step 12.
+- [ ] **Refresh** → session and project restored from `at.projectId` / `at.sessionId` in localStorage.
+
+- [ ] **Set `at.sessionId = "bogus"` in DevTools and refresh** → app recovers via tier-2 fallback to Lighthouse's newest session.
+
+- [ ] **Clear `at.projectId` and `at.sessionId` entirely and refresh** → app recovers via tier-3 fallback (first project's newest session, i.e. `proj-lighthouse` / `sess-lighthouse-01`).
+
+- [ ] **Console check** → DevTools console should be clean across the entire walkthrough. Any red error is a regression.
+
+- [ ] **Grep check for stale references**:
+```bash
+grep -rn 'sess-lighthouse-01' *.jsx        # expect 0 hits
+grep -rn 'state\.history\|useCrud("history"' *.jsx   # expect 0 hits
+grep -rn 'HistoryPage' *.jsx                # expect 0 hits
+```
+All three must return nothing. If any returns hits, that's a Chunk 1–4 cleanup miss.
+
+- [ ] Fix any failure found and commit each fix separately with a descriptive message.
 
 - [ ] **Final commit when all green.**
 
