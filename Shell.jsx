@@ -92,9 +92,11 @@ function Topbar({ page, projectName, sessionName, projects, sessions, currentPro
         <span>Atelier</span>
       </div>
       <div className="crumb">
+        {page !== "dashboard" && (
+          <button className="crumb-home" onClick={onHome} title="All projects"><Icon name="home" size={13} /></button>
+        )}
         {showCrumb ? (
           <>
-            <button className="crumb-home" onClick={onHome} title="All projects"><Icon name="home" size={13} /></button>
             <CrumbPopover
               label={projectName}
               items={projects.map(p => ({ id: p.id, name: p.name, meta: p.lastActive }))}

@@ -406,7 +406,7 @@ window.AppData = (() => {
       id: "proj-lighthouse",
       name: "Lighthouse",
       description: "Core PRD → Technical Design workstream.",
-      icon: "cube",
+      icon: "folder",
       color: "oklch(0.75 0.12 40)",
       defaultTemplateId: "tpl-prd2tech",
       status: "active",
@@ -429,7 +429,7 @@ window.AppData = (() => {
       id: "proj-ai-report",
       name: "AI Report Templates",
       description: "AI-assisted reporting template library.",
-      icon: "doc-code",
+      icon: "folder",
       color: "oklch(0.72 0.13 230)",
       defaultTemplateId: "tpl-data",
       status: "active",
@@ -469,7 +469,7 @@ window.AppData = (() => {
       id: "proj-pricing",
       name: "Pricing v2 GTM",
       description: "Pricing redesign go-to-market plan.",
-      icon: "grid",
+      icon: "folder",
       color: "oklch(0.72 0.13 150)",
       defaultTemplateId: "tpl-launch",
       status: "active",
@@ -481,7 +481,7 @@ window.AppData = (() => {
       id: "proj-outage",
       name: "P0 Outage Reviews",
       description: "Post-mortem and RCA workstream.",
-      icon: "alert",
+      icon: "folder",
       color: "oklch(0.68 0.15 25)",
       defaultTemplateId: "tpl-bugfix",
       status: "active",
@@ -493,8 +493,9 @@ window.AppData = (() => {
 
   const sessions = [
     // proj-lighthouse — the currently running session keeps the old name/id pattern
-    { id: "sess-lighthouse-01", projectId: "proj-lighthouse", name: "Lighthouse — PRD to Tech Design", status: "running", agents: 6, turns: 14, duration: "12m", when: "Now",       createdBy: "Lin Chen" },
-    { id: "sess-lighthouse-02", projectId: "proj-lighthouse", name: "Mobile auth refactor review",     status: "idle",    agents: 4, turns: 11, duration: "41m", when: "2d ago",   createdBy: "Lin Chen" },
+    { id: "sess-lighthouse-01", projectId: "proj-lighthouse", name: "Lighthouse — PRD to Tech Design", status: "running",  agents: 6, turns: 14, duration: "12m", when: "Now",       createdBy: "Lin Chen" },
+    { id: "sess-lighthouse-02", projectId: "proj-lighthouse", name: "Mobile auth refactor review",     status: "idle",     agents: 4, turns: 11, duration: "41m", when: "2d ago",   createdBy: "Lin Chen" },
+    { id: "sess-lighthouse-03", projectId: "proj-lighthouse", name: "Design system audit",             status: "archived", agents: 2, turns:  5, duration: "18m", when: "1w ago",   createdBy: "Lin Chen" },
 
     // proj-ai-report
     { id: "sess-ai-01", projectId: "proj-ai-report", name: "Q1 earnings report draft", status: "idle",     agents: 3, turns: 9, duration: "28m", when: "Yesterday", createdBy: "Lin Chen" },
@@ -510,5 +511,130 @@ window.AppData = (() => {
     { id: "sess-outage-02", projectId: "proj-outage", name: "Data model — Billing v3", status: "archived", agents: 3, turns: 4, duration: "8m",  when: "5d ago",    createdBy: "Lin Chen" },
   ];
 
-  return { agents, skills, knowledge, templates, projects, sessions, conversation, tasks, edges, nodePos, topologies, agentThreads, approvals };
+  // ——— Guided session flow ———
+  // Hardcoded clarification questions and a 6-agent script used by GuidedFlow.jsx
+  // when the user sends the first message in a fresh session.
+  const clarifyQuestions = [
+    {
+      id: "scope",
+      prompt: "数据范围？",
+      kind: "select",
+      options: [
+        { id: "7d",  label: "最近 7 天",  hint: "日级洞察，最快出结果" },
+        { id: "90d", label: "最近 90 天", hint: "覆盖一个完整业务季度（推荐）" },
+        { id: "all", label: "全量历史",   hint: "完整回溯，需更多算力" },
+      ],
+    },
+    {
+      id: "output",
+      prompt: "输出形式？",
+      kind: "select",
+      options: [
+        { id: "dash",   label: "实时看板",      hint: "可订阅的 dashboard" },
+        { id: "report", label: "周期性报告",    hint: "定时生成 PDF / 周报" },
+        { id: "both",   label: "看板 + 周报",   hint: "推荐 — 实时 + 沉淀" },
+      ],
+    },
+    {
+      id: "sla",
+      prompt: "优先级？",
+      kind: "select",
+      options: [
+        { id: "P1", label: "P1 · 当周交付" },
+        { id: "P2", label: "P2 · 当月交付" },
+        { id: "P3", label: "P3 · 季度规划" },
+      ],
+    },
+    {
+      id: "notes",
+      prompt: "还有什么要补充的？",
+      kind: "text",
+      placeholder: "可选 — 例如关注的关键指标、已知的口径差异…",
+    },
+  ];
+
+  const guidedAgentScript = [
+    {
+      id: "g-prd-reader",
+      name: "PRD 解读",
+      role: "Requirements",
+      icon: "scan",
+      color: "oklch(0.72 0.13 230)",
+      desc: "拆解 PRD 与需求文档，输出结构化需求清单与口径定义。",
+      prompt: "You are a senior product analyst. Read the PRD, extract metrics, dimensions, owners, and surface ambiguities for human review.",
+      skills: ["doc.parse", "req.extract", "kb.search"],
+      meta: { latency: "~3s/turn", tokens: "~2k" },
+      model: "claude-sonnet-4.5",
+    },
+    {
+      id: "g-coral-analyst",
+      name: "Coral 分析",
+      role: "Analytics",
+      icon: "compass",
+      color: "oklch(0.7 0.14 155)",
+      desc: "对接 Coral 数据源，完成口径校对、相似指标排查、可行性评估。",
+      prompt: "You audit metric definitions against the Coral catalogue. Flag duplicates, propose canonical definitions and dimension joins.",
+      skills: ["kb.search", "capacity.est"],
+      meta: { latency: "~5s/turn", tokens: "~3k" },
+      model: "claude-opus-4.1",
+    },
+    {
+      id: "g-sql-dev-1",
+      name: "SQL 开发 · 主",
+      role: "SQL Dev",
+      icon: "database",
+      color: "oklch(0.68 0.14 300)",
+      desc: "负责核心宽表与汇总层 SQL 开发，沉淀模板与共用函数。",
+      prompt: "Author production SQL for the hero metric. Optimize for cost and reuse across dashboards.",
+      skills: ["sql.design", "schema.validate"],
+      meta: { latency: "~6s/turn", tokens: "~4k" },
+      model: "claude-sonnet-4.5",
+    },
+    {
+      id: "g-sql-dev-2",
+      name: "SQL 开发 · 辅 A",
+      role: "SQL Dev",
+      icon: "database",
+      color: "oklch(0.7 0.13 285)",
+      desc: "对照口径开发明细层 SQL，处理维度退化与口径回填。",
+      prompt: "Implement detail-layer SQL aligned with the canonical definitions. Backfill historical dimension drift.",
+      skills: ["sql.design", "erd.gen"],
+      meta: { latency: "~5s/turn", tokens: "~3k" },
+      model: "claude-sonnet-4.5",
+    },
+    {
+      id: "g-sql-dev-3",
+      name: "SQL 开发 · 辅 B",
+      role: "SQL Dev",
+      icon: "database",
+      color: "oklch(0.66 0.14 320)",
+      desc: "围绕异常指标做下钻与归因 SQL，配合验收阶段交付。",
+      prompt: "Author drill-down SQL behind anomaly hot-cells. Coordinate with QA on attribution paths.",
+      skills: ["sql.design", "kb.search"],
+      meta: { latency: "~5s/turn", tokens: "~3k" },
+      model: "claude-sonnet-4.5",
+    },
+    {
+      id: "g-data-qa",
+      name: "数据验收",
+      role: "QA",
+      icon: "shield",
+      color: "oklch(0.7 0.14 25)",
+      desc: "交叉比对历史报表，跑断言用例，给出上线 go / no-go。",
+      prompt: "Cross-check outputs against historical reports. Run assertion suites and produce a launch readiness call.",
+      skills: ["schema.validate", "risk.matrix"],
+      meta: { latency: "~4s/turn", tokens: "~2k" },
+      model: "claude-haiku-4.5",
+    },
+  ];
+
+  const mockReplies = [
+    "Got it. Pulling context from the pinned KB and the latest two turns. I'll outline what I think you're asking for, flag anything that looks ambiguous, and propose the next concrete action — let me know if any of that is off.",
+    "Reviewing the attached materials now. Three things stand out so far: (1) the scope boundary between module A and B is still informal, (2) we don't have a latency budget for the fanout step, (3) the success metric hasn't been signed off. I'll draft a proposal addressing each and share in a moment.",
+    "Quick synthesis: we have two viable paths. Path A ships faster but locks us into the current storage layout for another quarter; Path B costs ~3 extra days but leaves us room to split tenancies later. I lean toward B — want me to draft the migration plan?",
+    "Checked the last 40 turns for anything related. No prior decision, so I'll propose one. Drafting a short ADR covering the tradeoff, the chosen option, and the rollback plan. Expect it in under a minute.",
+    "Done. Summary: the input was parsed cleanly, 2 conflicts flagged, 1 open question raised for the approver. Artifacts written to the workspace. Handing off to the next agent unless you want to review first.",
+  ];
+
+  return { agents, skills, knowledge, templates, projects, sessions, conversation, tasks, edges, nodePos, topologies, agentThreads, approvals, clarifyQuestions, guidedAgentScript, mockReplies };
 })();

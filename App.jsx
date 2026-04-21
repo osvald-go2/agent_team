@@ -115,10 +115,12 @@ function App() {
     else localStorage.removeItem("at.sessionId");
   }, [currentSessionId]);
 
-  const switchSession = (sessionId) => {
+  const switchSession = (sessionId, projectIdHint) => {
+    if (!sessionId) return;
     const sess = store.state.sessions.find(x => x.id === sessionId);
-    if (!sess) return;
-    setCurrent({ currentProjectId: sess.projectId, currentSessionId: sess.id });
+    const projectId = sess ? sess.projectId : projectIdHint;
+    if (!projectId) return;
+    setCurrent({ currentProjectId: projectId, currentSessionId: sessionId });
     setSelectedAgentId(null);
     setSelectedTaskId(null);
     setPage("chat");
@@ -139,6 +141,13 @@ function App() {
   const [selectedAgentId, setSelectedAgentId] = React.useState(null);
   const [selectedTaskId, setSelectedTaskId] = React.useState(null);
   const [tweaksOpen, setTweaksOpen] = React.useState(false);
+  // Guided session flow — owned here so both ChatArea and the right column can read it.
+  // phase: "idle" | "clarify" | "building" | "confirm" | "done"
+  const [guided, setGuided] = React.useState({ phase: "idle", clarify: null });
+  // Reset whenever the active session changes — flow is per-session and ephemeral.
+  React.useEffect(() => {
+    setGuided({ phase: "idle", clarify: null });
+  }, [currentSessionId]);
   const [rightW, setRightW] = React.useState(() => {
     const v = parseInt(localStorage.getItem("at.rightW"), 10);
     return Number.isFinite(v) ? v : 640;
@@ -211,6 +220,169 @@ function App() {
   };
 
   const slice = sliceBySession(D, store, currentSessionId);
+
+  // ——— Guided flow handlers ———
+  const appendMsg = React.useCallback((extra) => {
+    if (!currentSessionId) return;
+    const id = `msg-${currentSessionId}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 5)}`;
+    store.append("conversation", { id, sessionId: currentSessionId, ...extra });
+  }, [currentSessionId, store]);
+
+  const startGuided = React.useCallback((text) => {
+    if (!currentSessionId) return;
+    appendMsg({ role: "user", text });
+    appendMsg({
+      role: "assistant",
+      agent: "prd-analyst",
+      text: "已经解析了你的需求 —— 在右侧回答几个问题，我们就把团队装配起来。",
+    });
+    setGuided({ phase: "clarify", clarify: null });
+  }, [currentSessionId, appendMsg]);
+
+  // Quick-start a session from a preset: create session (in current or a fallback project),
+  // seed the guided-flow messages directly by sessionId (closure-free), then switch and enter clarify.
+  // setTimeout defers the guided-phase flip past the per-session reset effect on line ~148.
+  const quickStartSession = React.useCallback((preset) => {
+    if (!preset) return;
+    let projectId = currentProjectId;
+    if (!projectId) {
+      const active = store.state.projects.find(p => p.status !== "archived");
+      if (active) {
+        projectId = active.id;
+      } else {
+        const created = store.createProject({
+          name: preset.name,
+          description: preset.description,
+          defaultTemplateId: preset.defaultTemplateId,
+          icon: preset.icon,
+        });
+        projectId = created.projectId;
+      }
+    }
+    const sessionId = store.createSession(projectId, { name: preset.name });
+    const mk = (extra) => {
+      const id = `msg-${sessionId}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 5)}`;
+      store.append("conversation", { id, sessionId, ...extra });
+    };
+    mk({ role: "user", text: preset.prompt || preset.description });
+    mk({
+      role: "assistant",
+      agent: "prd-analyst",
+      text: "已经解析了你的需求 —— 在右侧回答几个问题，我们就把团队装配起来。",
+    });
+    switchSession(sessionId, projectId);
+    setTimeout(() => setGuided({ phase: "clarify", clarify: null }), 0);
+  }, [currentProjectId, store]);
+
+  const summarizeAnswers = (answers) => {
+    if (!answers) return "（已跳过澄清）";
+    const Q = D.clarifyQuestions;
+    const parts = [];
+    Q.forEach(q => {
+      const v = answers[q.id];
+      if (!v) return;
+      if (q.kind === "select") {
+        const o = q.options.find(x => x.id === v);
+        if (o) parts.push(`${q.prompt.replace(/[？?]$/, "")}: ${o.label}`);
+      } else if (q.kind === "text" && String(v).trim()) {
+        parts.push(`备注: ${String(v).trim()}`);
+      }
+    });
+    return parts.length ? parts.join(" · ") : "（未填写）";
+  };
+
+  const startBuildingPhase = React.useCallback(() => {
+    appendMsg({
+      role: "assistant",
+      agent: "prd-analyst",
+      text: "收到。正在为这次需求实时组建智能体团队…",
+    });
+    appendMsg({
+      role: "assistant",
+      agent: "prd-analyst",
+      kind: "agent-build",
+      agents: D.guidedAgentScript,
+      completed: false,
+    });
+    setGuided(g => ({ ...g, phase: "building" }));
+  }, [appendMsg, D.guidedAgentScript]);
+
+  const submitClarify = React.useCallback((answers) => {
+    appendMsg({ role: "user", text: summarizeAnswers(answers) });
+    setGuided(g => ({ ...g, clarify: answers }));
+    startBuildingPhase();
+  }, [appendMsg, startBuildingPhase, D.clarifyQuestions]);
+
+  const skipClarify = React.useCallback(() => {
+    appendMsg({ role: "user", text: "（跳过了澄清问题，请按默认装配）" });
+    startBuildingPhase();
+  }, [appendMsg, startBuildingPhase]);
+
+  // Called by AgentBuildCard.onComplete when the typewriter reaches the end.
+  // Idempotent: marks the build msg as completed and appends the confirm card at most once.
+  const finishBuilding = React.useCallback((buildMsgId) => {
+    if (!buildMsgId) return;
+    const buildMsg = store.state.conversation.find(m => m.id === buildMsgId);
+    if (buildMsg?.completed) return;
+    store.update("conversation", buildMsgId, { completed: true });
+    // Guard against a double-append if a confirm-team for this session already exists.
+    const hasConfirm = store.state.conversation.some(
+      m => m.sessionId === currentSessionId && m.kind === "confirm-team"
+    );
+    if (!hasConfirm) {
+      appendMsg({
+        role: "system",
+        kind: "confirm-team",
+        agents: D.guidedAgentScript,
+      });
+    }
+    setGuided(g => ({ ...g, phase: "confirm" }));
+  }, [appendMsg, store, currentSessionId, D.guidedAgentScript]);
+
+  const confirmTeam = React.useCallback((yes, msgId) => {
+    if (msgId) store.update("conversation", msgId, { decision: yes ? "yes" : "no" });
+    if (yes) {
+      D.guidedAgentScript.forEach(a => {
+        if (!store.state.agents.find(x => x.id === a.id)) {
+          store.create("agents", {
+            ...a,
+            status: "queued",
+            progress: 0,
+            knowledge: a.knowledge || [],
+          });
+        }
+      });
+      const stamp = Date.now().toString(36);
+      D.guidedAgentScript.forEach((a, i) => {
+        store.create("tasks", {
+          id: `ta-${stamp}-${i}`,
+          sessionId: currentSessionId,
+          title: `${a.name} — initial pass`,
+          agent: a.id,
+          status: "queued",
+          priority: "P2",
+          due: "Today",
+          activity: "Queued · waiting for upstream input",
+          todos: [],
+        });
+      });
+      appendMsg({
+        role: "assistant",
+        agent: "prd-analyst",
+        text: `已分配 ${D.guidedAgentScript.length} 条任务，右侧切换到看板查看进度。`,
+      });
+      setRightView("kanban");
+      setRightCollapsed(false);
+    } else {
+      appendMsg({
+        role: "assistant",
+        agent: "prd-analyst",
+        text: "好的，先不下发。需要时随时再说。",
+      });
+    }
+    setGuided({ phase: "done", clarify: null });
+  }, [appendMsg, store, currentSessionId, D.guidedAgentScript]);
+
   const selectedAgent = selectedAgentId ? store.state.agents.find(a => a.id === selectedAgentId) : null;
   const selectedThread = (selectedAgentId && currentSessionId)
     ? (D.agentThreads[currentSessionId]?.[selectedAgentId] || [])
@@ -223,6 +395,33 @@ function App() {
   const densityClass = "app-density-" + settings.density;
   const appClass = "app " + (settings.density !== "default" ? densityClass : "") + (page === "chat" && rightCollapsed ? " right-collapsed" : "");
   const appStyle = page === "chat" && !rightCollapsed ? { "--right-w": rightW + "px" } : undefined;
+
+  // Dashboard is full-bleed: render outside the app grid (no Sidebar, no Topbar).
+  if (page === "dashboard") {
+    const recentSess = store.state.sessions.find(s => s.projectId === currentProjectId)
+      || store.state.sessions[0];
+    return (
+      <div className={"dashboard-page " + (settings.density !== "default" ? densityClass : "")}>
+        <Dashboard
+          store={store}
+          recentSession={recentSess}
+          onExit={() => { if (recentSess) switchSession(recentSess.id, recentSess.projectId); }}
+          onOpenProject={(id) => switchProject(id)}
+          onOpenSession={(sid, pid) => switchSession(sid, pid)}
+          onQuickstart={(preset) => {
+            const { projectId, sessionId } = store.createProject({
+              name: preset.name,
+              description: preset.description,
+              defaultTemplateId: preset.defaultTemplateId,
+              icon: preset.icon,
+            });
+            switchSession(sessionId, projectId);
+          }}
+        />
+        {tweaksOpen && <Tweaks settings={settings} setSettings={persistSettings} />}
+      </div>
+    );
+  }
 
   const approvalsCount = currentProjectId
     ? store.state.approvals.filter(a => {
@@ -261,6 +460,10 @@ function App() {
               templates={D.templates}
               store={store}
               currentSessionId={currentSessionId}
+              onStartGuided={startGuided}
+              onConfirmTeam={confirmTeam}
+              onBuildComplete={finishBuilding}
+              guidedPhase={guided.phase}
             />
           </main>
           {!rightCollapsed && (
@@ -273,21 +476,29 @@ function App() {
               >
                 <div className="grip"><Icon name="dots" size={12} style={{ transform: "rotate(90deg)" }} /></div>
               </div>
-              <TeamView
-                view={rightView}
-                setView={setRightView}
-                agents={store.state.agents}
-                tasks={slice.tasks}
-                edges={slice.edges}
-                nodePos={slice.nodePos}
-                topologies={D.topologies}
-                onSelectAgent={setSelectedAgentId}
-                onSelectTask={setSelectedTaskId}
-                selectedId={selectedAgentId}
-                onCollapse={() => setRightCollapsed(true)}
-                store={store}
-                currentSessionId={currentSessionId}
-              />
+              {guided.phase === "clarify" ? (
+                <ClarifyPanel
+                  questions={D.clarifyQuestions}
+                  onSubmit={submitClarify}
+                  onSkip={skipClarify}
+                />
+              ) : (
+                <TeamView
+                  view={rightView}
+                  setView={setRightView}
+                  agents={store.state.agents}
+                  tasks={slice.tasks}
+                  edges={slice.edges}
+                  nodePos={slice.nodePos}
+                  topologies={D.topologies}
+                  onSelectAgent={setSelectedAgentId}
+                  onSelectTask={setSelectedTaskId}
+                  selectedId={selectedAgentId}
+                  onCollapse={() => setRightCollapsed(true)}
+                  store={store}
+                  currentSessionId={currentSessionId}
+                />
+              )}
             </>
           )}
           {rightCollapsed && (
@@ -316,22 +527,6 @@ function App() {
           style={{ gridColumn: "2 / -1", borderRight: "none", overflow: "auto" }}
           data-screen-label={"Page/" + page}
         >
-          {page === "dashboard" && (
-            <Dashboard
-              store={store}
-              onOpenProject={(id) => switchProject(id)}
-              onOpenSession={switchSession}
-              onQuickstart={(preset) => {
-                const { projectId, sessionId } = store.createProject({
-                  name: preset.name,
-                  description: preset.description,
-                  defaultTemplateId: preset.defaultTemplateId,
-                  icon: preset.icon,
-                });
-                switchSession(sessionId);
-              }}
-            />
-          )}
           {page === "agents" && (detail?.kind === "agent"
             ? <AgentDetail agentId={detail.id} store={store} goBack={backToList} goToEntity={goToEntity} />
             : <AgentsPage store={store} onOpen={(id) => setDetail({ kind: "agent", id })} />)}
@@ -349,6 +544,7 @@ function App() {
               store={store}
               currentProjectId={currentProjectId}
               onOpenSession={switchSession}
+              onQuickStart={quickStartSession}
             />
           )}
           {page === "approvals" && <ApprovalsPage store={store} agents={store.state.agents} />}
@@ -393,6 +589,7 @@ function App() {
       )}
 
       {tweaksOpen && <Tweaks settings={settings} setSettings={persistSettings} />}
+      <ToastHost />
     </div>
   );
 }

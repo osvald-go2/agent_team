@@ -26,6 +26,15 @@ function useEntityStore() {
     });
   }, []);
 
+  // Append-only variant for chronological collections (e.g. conversation):
+  // `create` prepends, which puts new chat messages at the top of the thread.
+  const append = React.useCallback((key, item) => {
+    setState(s => {
+      const id = item.id || `${key.slice(0, 2)}-${Date.now().toString(36)}`;
+      return { ...s, [key]: [...s[key], { ...item, id }] };
+    });
+  }, []);
+
   const update = React.useCallback((key, id, patch) => {
     setState(s => ({ ...s, [key]: s[key].map(x => x.id === id ? { ...x, ...patch } : x) }));
   }, []);
@@ -57,7 +66,7 @@ function useEntityStore() {
           id: projectId,
           name: name || "Untitled project",
           description: description || "",
-          icon: icon || "cube",
+          icon: icon || "folder",
           color: color || "oklch(0.72 0.13 80)",
           defaultTemplateId: defaultTemplateId || null,
           status: "active",
@@ -153,7 +162,7 @@ function useEntityStore() {
   }, []);
 
   return {
-    state, create, update, remove, duplicate,
+    state, create, append, update, remove, duplicate,
     createProject, createSession,
     archiveProject, archiveSession,
     renameProject, renameSession,
@@ -164,30 +173,39 @@ function useEntityStore() {
 /* ——— Dropdown row menu ——— */
 function RowMenu({ onView, onEdit, onDuplicate, onDelete, align = "right" }) {
   const [open, setOpen] = React.useState(false);
+  const [leaving, setLeaving] = React.useState(false);
   const ref = React.useRef(null);
-  React.useEffect(() => {
+
+  const closeMenu = React.useCallback(() => {
     if (!open) return;
-    const onDoc = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
-    document.addEventListener("mousedown", onDoc);
-    return () => document.removeEventListener("mousedown", onDoc);
+    setLeaving(true);
+    setTimeout(() => { setOpen(false); setLeaving(false); }, 100);
   }, [open]);
 
-  const call = (fn) => (e) => {
+  React.useEffect(() => {
+    if (!open) return;
+    const onDoc = (e) => { if (ref.current && !ref.current.contains(e.target)) closeMenu(); };
+    document.addEventListener("mousedown", onDoc);
+    return () => document.removeEventListener("mousedown", onDoc);
+  }, [open, closeMenu]);
+
+  const call = (fn, toastMsg) => (e) => {
     e.stopPropagation();
-    setOpen(false);
+    closeMenu();
     fn && fn();
+    if (toastMsg && window.toast) setTimeout(() => window.toast(toastMsg, { kind: "success" }), 120);
   };
 
   return (
     <div className={"rowmenu-wrap " + (align === "left" ? "al-l" : "al-r")} ref={ref}>
-      <button className="ibtn" onClick={(e) => { e.stopPropagation(); setOpen(o => !o); }} aria-label="Actions">
+      <button className="ibtn" onClick={(e) => { e.stopPropagation(); open ? closeMenu() : setOpen(true); }} aria-label="Actions">
         <Icon name="dots" size={14} />
       </button>
       {open && (
-        <div className="rowmenu" onClick={e => e.stopPropagation()}>
+        <div className={"rowmenu " + (leaving ? "is-leaving" : "")} onClick={e => e.stopPropagation()}>
           {onView && <button onClick={call(onView)}><Icon name="eye" size={12} /> View details</button>}
           {onEdit && <button onClick={call(onEdit)}><Icon name="edit" size={12} /> Edit</button>}
-          {onDuplicate && <button onClick={call(onDuplicate)}><Icon name="copy" size={12} /> Duplicate</button>}
+          {onDuplicate && <button onClick={call(onDuplicate, "Duplicated")}><Icon name="copy" size={12} /> Duplicate</button>}
           {(onView || onEdit || onDuplicate) && onDelete && <div className="rowmenu-sep" />}
           {onDelete && <button className="danger" onClick={call(onDelete)}><Icon name="trash" size={12} /> Delete</button>}
         </div>
@@ -198,10 +216,32 @@ function RowMenu({ onView, onEdit, onDuplicate, onDelete, align = "right" }) {
 
 /* ——— Confirm dialog ——— */
 function ConfirmDialog({ open, title, body, confirmLabel = "Delete", danger = true, onConfirm, onCancel }) {
-  if (!open) return null;
+  const [visible, setVisible] = React.useState(open);
+  const [leaving, setLeaving] = React.useState(false);
+  const [busy, setBusy] = React.useState(false);
+
+  React.useEffect(() => {
+    if (open) { setVisible(true); setLeaving(false); setBusy(false); return; }
+    if (!visible) return;
+    setLeaving(true);
+    const t = setTimeout(() => { setVisible(false); setLeaving(false); setBusy(false); }, 160);
+    return () => clearTimeout(t);
+  }, [open]);
+
+  if (!visible) return null;
+
+  const handleConfirm = () => {
+    if (busy) return;
+    setBusy(true);
+    setTimeout(() => {
+      onConfirm && onConfirm();
+      if (window.toast) window.toast(danger ? "Deleted" : "Done", { kind: danger ? "info" : "success" });
+    }, 650);
+  };
+
   return (
-    <div className="modal-backdrop" onClick={onCancel}>
-      <div className="modal" onClick={e => e.stopPropagation()}>
+    <div className={"modal-backdrop " + (leaving ? "is-leaving" : "")} onClick={busy ? undefined : onCancel}>
+      <div className={"modal " + (leaving ? "is-leaving" : "")} onClick={e => e.stopPropagation()}>
         <div className="modal-head">
           <div className={"modal-icon " + (danger ? "danger" : "")}>
             <Icon name={danger ? "trash" : "alert"} size={14} />
@@ -212,8 +252,10 @@ function ConfirmDialog({ open, title, body, confirmLabel = "Delete", danger = tr
           </div>
         </div>
         <div className="modal-actions">
-          <button className="btn-ghost" onClick={onCancel}>Cancel</button>
-          <button className={danger ? "btn-danger" : "btn-primary"} onClick={onConfirm}>{confirmLabel}</button>
+          <button className="btn-ghost" onClick={onCancel} disabled={busy}>Cancel</button>
+          <button className={danger ? "btn-danger" : "btn-primary"} onClick={handleConfirm} disabled={busy}>
+            {busy ? <><span className="spinner-sm" /> {danger ? "Deleting…" : "Working…"}</> : confirmLabel}
+          </button>
         </div>
       </div>
     </div>
@@ -379,10 +421,64 @@ function Field({ field, value, onChange, mode, context }) {
  *   onModeChange?(mode)  // e.g. switch from view -> edit
  *   extras?: ReactNode   // extra panel below fields (read-only sections for 'view')
  */
+function EntityDrawerSkeleton({ fieldCount = 5 }) {
+  return (
+    <>
+      <div className="entity-drawer-head">
+        <div style={{ flex: 1, minWidth: 0 }} className="skel-stack">
+          <span className="skel skel-line-sm" style={{ width: 54 }} />
+          <span className="skel skel-line-lg" style={{ width: "60%" }} />
+          <span className="skel skel-line-sm" style={{ width: "35%" }} />
+        </div>
+      </div>
+      <div className="entity-drawer-body">
+        <div className="ed-fields skel-stack" style={{ gap: 18 }}>
+          {Array.from({ length: fieldCount }).map((_, i) => (
+            <div key={i} className="skel-stack" style={{ gap: 6 }}>
+              <span className="skel skel-line-sm" style={{ width: 80 }} />
+              <span className="skel skel-line-lg" style={{ width: i % 2 === 0 ? "100%" : "70%" }} />
+            </div>
+          ))}
+        </div>
+      </div>
+      <div className="entity-drawer-foot">
+        <div style={{ flex: 1 }} />
+        <span className="skel skel-line-lg" style={{ width: 72 }} />
+        <span className="skel skel-line-lg" style={{ width: 120 }} />
+      </div>
+    </>
+  );
+}
+
 function EntityDrawer({ open, mode, title, subtitle, fields, value, onClose, onSave, onDelete, onModeChange, extras, sideMeta }) {
+  const [visible, setVisible] = React.useState(open);
+  const [leaving, setLeaving] = React.useState(false);
+  const [ready, setReady] = React.useState(false);
+  const [saving, setSaving] = React.useState(false);
   const [draft, setDraft] = React.useState(value || {});
+
   React.useEffect(() => { setDraft(value || {}); }, [value, mode, open]);
-  if (!open) return null;
+
+  React.useEffect(() => {
+    if (open) {
+      setVisible(true);
+      setLeaving(false);
+      setSaving(false);
+      setReady(false);
+      const t = setTimeout(() => setReady(true), 260);
+      return () => clearTimeout(t);
+    }
+    if (!visible) return;
+    setLeaving(true);
+    const t = setTimeout(() => {
+      setVisible(false);
+      setLeaving(false);
+      setReady(false);
+    }, 200);
+    return () => clearTimeout(t);
+  }, [open]);
+
+  if (!visible) return null;
 
   const set = (name, v) => setDraft(d => ({ ...d, [name]: v }));
 
@@ -390,51 +486,73 @@ function EntityDrawer({ open, mode, title, subtitle, fields, value, onClose, onS
   const isNew = mode === "new";
   const isEdit = mode === "edit";
 
+  const handleSave = () => {
+    if (saving) return;
+    setSaving(true);
+    setTimeout(() => {
+      onSave && onSave(draft);
+      if (window.toast) window.toast(isNew ? "Created" : "Saved", { kind: "success" });
+    }, 700);
+  };
+
+  const safeClose = () => {
+    if (saving) return;
+    onClose && onClose();
+  };
+
   return (
-    <div className="entity-drawer-backdrop" onClick={onClose}>
-      <aside className="entity-drawer" onClick={e => e.stopPropagation()}>
-        <div className="entity-drawer-head">
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <div className="ed-mode-pill">
-              {isNew && <><Icon name="plus" size={10} /> New</>}
-              {isView && <><Icon name="eye" size={10} /> Details</>}
-              {isEdit && <><Icon name="edit" size={10} /> Editing</>}
+    <div className={"entity-drawer-backdrop " + (leaving ? "is-leaving" : "")} onClick={safeClose}>
+      <aside className={"entity-drawer " + (leaving ? "is-leaving" : "")} onClick={e => e.stopPropagation()}>
+        {!ready ? (
+          <EntityDrawerSkeleton fieldCount={Math.min(fields.length, 6)} />
+        ) : (
+          <>
+            <div className="entity-drawer-head">
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div className="ed-mode-pill">
+                  {isNew && <><Icon name="plus" size={10} /> New</>}
+                  {isView && <><Icon name="eye" size={10} /> Details</>}
+                  {isEdit && <><Icon name="edit" size={10} /> Editing</>}
+                </div>
+                <div className="ed-title">{title}</div>
+                {subtitle && <div className="ed-sub">{subtitle}</div>}
+              </div>
+              <button className="ibtn" onClick={safeClose} aria-label="Close" disabled={saving}><Icon name="x" size={14} /></button>
             </div>
-            <div className="ed-title">{title}</div>
-            {subtitle && <div className="ed-sub">{subtitle}</div>}
-          </div>
-          <button className="ibtn" onClick={onClose} aria-label="Close"><Icon name="x" size={14} /></button>
-        </div>
 
-        <div className="entity-drawer-body">
-          <div className="ed-fields">
-            {fields.map(f => (
-              <Field key={f.name} field={f} value={draft[f.name]} onChange={v => set(f.name, v)} mode={mode} context={draft} />
-            ))}
-          </div>
-          {isView && extras && <div className="ed-extras">{extras}</div>}
-          {sideMeta && <div className="ed-meta">{sideMeta}</div>}
-        </div>
+            <div className="entity-drawer-body">
+              <div className="ed-fields">
+                {fields.map(f => (
+                  <Field key={f.name} field={f} value={draft[f.name]} onChange={v => set(f.name, v)} mode={mode} context={draft} />
+                ))}
+              </div>
+              {isView && extras && <div className="ed-extras">{extras}</div>}
+              {sideMeta && <div className="ed-meta">{sideMeta}</div>}
+            </div>
 
-        <div className="entity-drawer-foot">
-          {isView ? (
-            <>
-              {onDelete && <button className="btn-ghost danger" onClick={onDelete}><Icon name="trash" size={11} /> Delete</button>}
-              <div style={{ flex: 1 }} />
-              <button className="btn-ghost" onClick={onClose}>Close</button>
-              {onModeChange && <button className="btn-primary-accent" onClick={() => onModeChange("edit")}><Icon name="edit" size={11} /> Edit</button>}
-            </>
-          ) : (
-            <>
-              {isEdit && onDelete && <button className="btn-ghost danger" onClick={onDelete}><Icon name="trash" size={11} /> Delete</button>}
-              <div style={{ flex: 1 }} />
-              <button className="btn-ghost" onClick={onClose}>Cancel</button>
-              <button className="btn-primary-accent" onClick={() => onSave(draft)}>
-                <Icon name="check" size={11} /> {isNew ? "Create" : "Save changes"}
-              </button>
-            </>
-          )}
-        </div>
+            <div className="entity-drawer-foot">
+              {isView ? (
+                <>
+                  {onDelete && <button className="btn-ghost danger" onClick={onDelete}><Icon name="trash" size={11} /> Delete</button>}
+                  <div style={{ flex: 1 }} />
+                  <button className="btn-ghost" onClick={safeClose}>Close</button>
+                  {onModeChange && <button className="btn-primary-accent" onClick={() => onModeChange("edit")}><Icon name="edit" size={11} /> Edit</button>}
+                </>
+              ) : (
+                <>
+                  {isEdit && onDelete && <button className="btn-ghost danger" onClick={onDelete} disabled={saving}><Icon name="trash" size={11} /> Delete</button>}
+                  <div style={{ flex: 1 }} />
+                  <button className="btn-ghost" onClick={safeClose} disabled={saving}>Cancel</button>
+                  <button className="btn-primary-accent" onClick={handleSave} disabled={saving}>
+                    {saving
+                      ? <><span className="spinner-sm" /> {isNew ? "Creating…" : "Saving…"}</>
+                      : <><Icon name="check" size={11} /> {isNew ? "Create" : "Save changes"}</>}
+                  </button>
+                </>
+              )}
+            </div>
+          </>
+        )}
       </aside>
     </div>
   );

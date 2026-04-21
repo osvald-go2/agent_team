@@ -1,5 +1,37 @@
 // Main chat area — user conversation with the Team
 
+function useTypewriter(text, enabled, onDone) {
+  const [chars, setChars] = React.useState(enabled ? 0 : (text || "").length);
+  const onDoneRef = React.useRef(onDone);
+  React.useEffect(() => { onDoneRef.current = onDone; }, [onDone]);
+
+  React.useEffect(() => {
+    if (!enabled || !text) {
+      setChars((text || "").length);
+      return;
+    }
+    setChars(0);
+    const total = text.length;
+    const perChar = Math.max(9, Math.min(22, 2800 / total));
+    let i = 0;
+    let timer;
+    const tick = () => {
+      i += 1;
+      if (i >= total) {
+        setChars(total);
+        onDoneRef.current && onDoneRef.current();
+        return;
+      }
+      setChars(i);
+      timer = setTimeout(tick, perChar);
+    };
+    timer = setTimeout(tick, perChar);
+    return () => clearTimeout(timer);
+  }, [text, enabled]);
+
+  return Math.min(chars, (text || "").length);
+}
+
 function AgentBadge({ agent, size = 22 }) {
   if (!agent) return null;
   return (
@@ -99,15 +131,55 @@ function ApprovalCard({ msg, agents, onDecide }) {
   );
 }
 
-function Message({ msg, agents, onSelectAgent, onDecide }) {
+function Message({ msg, agents, onSelectAgent, onDecide, onConfirmTeam, onStreamingDone, onBuildComplete }) {
+  const streaming = !!msg.streaming;
+  const revealedChars = useTypewriter(msg.text || "", streaming, React.useCallback(() => {
+    onStreamingDone && onStreamingDone(msg.id);
+  }, [msg.id, onStreamingDone]));
+
   if (msg.kind === "team-proposal") {
     return <TeamProposalCard msg={msg} agents={agents} />;
   }
   if (msg.kind === "approval") {
     return <ApprovalCard msg={msg} agents={agents} onDecide={onDecide} />;
   }
+  if (msg.kind === "agent-build" && window.AgentBuildCard) {
+    return (
+      <window.AgentBuildCard
+        msg={msg}
+        onComplete={() => onBuildComplete?.(msg.id)}
+      />
+    );
+  }
+  if (msg.kind === "confirm-team" && window.ConfirmTeamCard) {
+    return (
+      <window.ConfirmTeamCard
+        msg={msg}
+        onYes={() => onConfirmTeam?.(true, msg.id)}
+        onNo={() => onConfirmTeam?.(false, msg.id)}
+      />
+    );
+  }
 
   const agent = msg.agent ? agents.find(a => a.id === msg.agent) : null;
+
+  if (msg.kind === "typing") {
+    return (
+      <div className="msg msg-team">
+        {agent
+          ? <span className="msg-label">
+              <AgentBadge agent={agent} size={18} />
+              <span>{agent.name}</span>
+              <span className="msg-role">typing…</span>
+            </span>
+          : <span className="msg-label">Team</span>}
+        <div className="msg-body">
+          <div className="msg-typing"><span className="td" /><span className="td" /><span className="td" /></div>
+        </div>
+      </div>
+    );
+  }
+
   const isUser = msg.role === "user";
   const isSystem = msg.role === "system";
   const roleClass = isUser ? "msg-user" : isSystem ? "msg-system" : "msg-team";
@@ -122,10 +194,12 @@ function Message({ msg, agents, onSelectAgent, onDecide }) {
         </span>
       : <span className="msg-label">Team</span>;
 
+  const displayText = streaming ? (msg.text || "").slice(0, revealedChars) : msg.text;
+
   return (
     <div className={"msg " + roleClass}>
       {label}
-      {msg.text && <div className="msg-body">{msg.text}</div>}
+      {msg.text && <div className={"msg-body" + (streaming ? " is-streaming" : "")}>{displayText}</div>}
       {msg.attachments && (
         <div className="msg-chips">
           {msg.attachments.map((a, i) => (
@@ -158,37 +232,61 @@ function Message({ msg, agents, onSelectAgent, onDecide }) {
   );
 }
 
-const Composer = React.forwardRef(function Composer({ empty, onSend, value, onChange, placeholder = "Describe what you want to create..." }, ref) {
+const Composer = React.forwardRef(function Composer({ empty, onSend, value, onChange, placeholder = "Describe what you want to create...", disabled = false }, ref) {
   const taRef = React.useRef(null);
+  const [sending, setSending] = React.useState(false);
   React.useImperativeHandle(ref, () => ({
     focus: () => taRef.current?.focus(),
     setValue: (v) => { onChange?.(v); setTimeout(() => taRef.current?.focus(), 0); },
   }));
+  React.useLayoutEffect(() => {
+    const ta = taRef.current;
+    if (!ta) return;
+    const lh = parseFloat(getComputedStyle(ta).lineHeight) || 22;
+    const padY = parseFloat(getComputedStyle(ta).paddingTop) + parseFloat(getComputedStyle(ta).paddingBottom);
+    const minH = lh * 2 + padY;
+    const maxH = lh * 10 + padY;
+    ta.style.height = "auto";
+    const next = Math.max(minH, Math.min(ta.scrollHeight, maxH));
+    ta.style.height = next + "px";
+    ta.style.overflowY = ta.scrollHeight > maxH ? "auto" : "hidden";
+  }, [value]);
   const send = () => {
-    if (!value?.trim()) return;
-    onSend?.(value);
-    onChange?.("");
+    if (disabled || sending || !value?.trim()) return;
+    const payload = value;
+    setSending(true);
+    setTimeout(() => {
+      onSend?.(payload);
+      onChange?.("");
+      setSending(false);
+    }, 320);
   };
+  const busy = disabled || sending;
   return (
-    <div className="composer">
-      <textarea
-        ref={taRef}
-        className="composer-input"
-        value={value || ""}
-        onChange={e => onChange?.(e.target.value)}
-        onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
-        placeholder={placeholder}
-        rows={1}
-      />
-      <div className="composer-bar">
-        <button className="cmp-icon" title="Settings" onClick={() => {}}><Icon name="sliders" size={13} /></button>
-        <button className="cmp-icon" title="Attach"   onClick={() => {}}><Icon name="paperclip" size={13} /></button>
-        <button className="cmp-icon" title="Voice"    onClick={() => {}}><Icon name="mic" size={13} /></button>
-        <button className="cmp-icon cmp-import"       onClick={() => {}}><Icon name="upload" size={12} /> Import</button>
-        <div className="cmp-spacer" />
-        <button className="primary-btn cmp-send" disabled={!value?.trim()} onClick={send}>
-          <Icon name="send" size={12} /> Send
-        </button>
+    <div className="composer-dock">
+      <div className={"composer " + (busy ? "is-disabled" : "")}>
+        <textarea
+          ref={taRef}
+          className="composer-input"
+          value={value || ""}
+          onChange={e => onChange?.(e.target.value)}
+          onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
+          placeholder={placeholder}
+          rows={2}
+          disabled={busy}
+        />
+        <div className="composer-bar">
+          <button className="cmp-icon" title="Settings" onClick={() => {}} disabled={busy}><Icon name="sliders" size={13} /></button>
+          <button className="cmp-icon" title="Attach"   onClick={() => {}} disabled={busy}><Icon name="paperclip" size={13} /></button>
+          <button className="cmp-icon" title="Voice"    onClick={() => {}} disabled={busy}><Icon name="mic" size={13} /></button>
+          <button className="cmp-icon cmp-import"       onClick={() => {}} disabled={busy}><Icon name="upload" size={12} /> Import</button>
+          <div className="cmp-spacer" />
+          <button className="btn-primary-accent cmp-send" disabled={busy || !value?.trim()} onClick={send}>
+            {sending
+              ? <><span className="spinner-sm" /> Sending</>
+              : <><Icon name="send" size={12} /> Send</>}
+          </button>
+        </div>
       </div>
     </div>
   );
@@ -330,7 +428,7 @@ function WelcomeHero({ onStart, onPickTemplate, templates }) {
   );
 }
 
-function ChatArea({ onSelectAgent, conversation, agents, templates, forceEmpty, onExit, store, currentSessionId }) {
+function ChatArea({ onSelectAgent, conversation, agents, templates, forceEmpty, onExit, store, currentSessionId, onStartGuided, onConfirmTeam, onBuildComplete, guidedPhase }) {
   const [isEmpty, setIsEmpty] = React.useState(() => {
     if (forceEmpty !== undefined) return forceEmpty;
     try { return localStorage.getItem("at.chat.empty") === "1"; } catch { return false; }
@@ -360,11 +458,46 @@ function ChatArea({ onSelectAgent, conversation, agents, templates, forceEmpty, 
     handleStart(`Run the "${tpl.name}" team template. Scope: `);
   };
   const handleSend = (text) => {
-    if (!text?.trim() || !currentSessionId || !store) return;
-    const id = `msg-${currentSessionId}-${Date.now().toString(36)}`;
-    store.create("conversation", { id, sessionId: currentSessionId, role: "user", text: text.trim() });
+    const trimmed = text?.trim();
+    if (!trimmed || !currentSessionId || !store) return;
+    // First non-system turn → hand off to guided flow (App owns message creation).
+    const nonSystem = conversation.filter(m => m.role !== "system").length;
+    if (nonSystem === 0 && onStartGuided) {
+      onStartGuided(trimmed);
+      goFull();
+      return;
+    }
+    const userId = `msg-${currentSessionId}-${Date.now().toString(36)}`;
+    (store.append || store.create)("conversation", { id: userId, sessionId: currentSessionId, role: "user", text: trimmed });
     goFull();
+
+    // Mock agent reply: typing placeholder → streaming bubble → final text.
+    const D = window.AppData;
+    const pool = D?.mockReplies || ["Working on it."];
+    const replyText = pool[Math.floor(Math.random() * pool.length)];
+    const recentAgent = [...conversation].reverse().find(m => m.role === "agent" && m.agent)?.agent;
+    const agentId = recentAgent || agents[0]?.id;
+    const typingId = `typ-${currentSessionId}-${Date.now().toString(36)}`;
+    const replyId  = `msg-${currentSessionId}-${(Date.now() + 1).toString(36)}`;
+    const append = store.append || store.create;
+
+    setTimeout(() => {
+      append("conversation", {
+        id: typingId, sessionId: currentSessionId, role: "agent", agent: agentId, kind: "typing",
+      });
+    }, 350);
+    setTimeout(() => {
+      store.remove("conversation", typingId);
+      append("conversation", {
+        id: replyId, sessionId: currentSessionId, role: "agent", agent: agentId,
+        text: replyText, streaming: true,
+      });
+    }, 1000);
   };
+
+  const handleStreamingDone = React.useCallback((msgId) => {
+    store?.update("conversation", msgId, { streaming: false });
+  }, [store]);
 
   return (
     <>
@@ -405,22 +538,54 @@ function ChatArea({ onSelectAgent, conversation, agents, templates, forceEmpty, 
         ) : (
           <div className="chat-thread">
             {conversation.map(m => (
-              <Message key={m.id} msg={m} agents={agents} onSelectAgent={onSelectAgent} />
+              <Message
+                key={m.id}
+                msg={m}
+                agents={agents}
+                onSelectAgent={onSelectAgent}
+                onConfirmTeam={onConfirmTeam}
+                onBuildComplete={onBuildComplete}
+                onStreamingDone={handleStreamingDone}
+              />
             ))}
           </div>
         )}
       </div>
-      <Composer ref={composerRef} empty={isEmpty} onSend={handleSend} value={draft} onChange={setDraft} />
+      <Composer
+        ref={composerRef}
+        empty={isEmpty}
+        onSend={handleSend}
+        value={draft}
+        onChange={setDraft}
+        disabled={guidedPhase === "clarify" || guidedPhase === "building"}
+        placeholder={
+          guidedPhase === "clarify"  ? "右侧回答几个问题后再继续…" :
+          guidedPhase === "building" ? "智能体正在组建中…" :
+          undefined
+        }
+      />
     </>
   );
 }
 
-function InlineNotice({ icon = "info", children, action, onAction }) {
+function InlineNotice({ icon = "info", kind = "info", children, action, onAction, dismissible, onClose }) {
+  const [leaving, setLeaving] = React.useState(false);
+  const [gone, setGone] = React.useState(false);
+  const close = () => {
+    setLeaving(true);
+    setTimeout(() => { setGone(true); onClose && onClose(); }, 140);
+  };
+  if (gone) return null;
   return (
-    <div className="inline-notice">
+    <div className={"inline-notice " + kind + (leaving ? " is-leaving" : "")}>
       <Icon name={icon} size={13} />
       <span className="in-text">{children}</span>
       {action && <button className="in-action" onClick={onAction}>{action} →</button>}
+      {dismissible && (
+        <button className="in-close" onClick={close} aria-label="Dismiss">
+          <Icon name="x" size={11} />
+        </button>
+      )}
     </div>
   );
 }

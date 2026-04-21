@@ -43,6 +43,7 @@ The Graph view's `AgentDrawer` (triggered from `onSelectAgent`) is the reference
 - Click backdrop / press ESC / click × closes the drawer (clears `selectedTaskId`)
 - Clicking another Kanban card while open replaces content (no transition)
 - If `selectedAgentId` is also set, the Task drawer layers above `AgentDrawer` (higher `z-index`); opening Task does not clear agent selection
+- Clicking the agent pill inside the Task tab sets `selectedAgentId` **without** clearing `selectedTaskId` — `AgentDrawer` then layers above `TaskDrawer`. Closing `AgentDrawer` leaves `TaskDrawer` still open underneath
 
 ### Scope of state
 
@@ -109,10 +110,10 @@ Shape:
 ```
 
 - **No progress bar**, **no priority badge** (per user decision)
-- Reuses `todo-list` / `todo-items` / `todo-row` CSS; adds `.s-doing` / `.s-todo` variants because existing variants cover agent-task statuses, not sub-step statuses
-- Clicking a checkbox cycles state: `todo → doing → done → todo`
+- Reuses `todo-list` / `todo-items` / `todo-row` CSS; adds `.s-doing` / `.s-todo` variants. `.s-done` is shared between the existing agent-task status system (used by `AgentDrawer`'s `TaskTodoList`) and the new sub-step system — the check icon render is compatible, so sharing is intentional. `.s-running` / `.s-awaiting` / `.s-queued` are unaffected because sub-steps never take those values
+- Clicking a checkbox cycles state: `todo → doing → done → todo` (clicking a `done` todo cycles it back to `todo` — no implicit bulk reset)
 - Hovering a row reveals a right-aligned × to delete that step
-- `[+ Add step]` expands into a textarea; Enter commits a new `{id, text, status:"todo"}` to `todos`
+- `[+ Add step]` expands into a textarea; Enter commits a new `{id, text, status:"todo"}` to `todos`. New todo ids use `` `${task.id}-${Date.now().toString(36)}` `` (same `Date.now().toString(36)` pattern `useEntityStore` uses for `create`)
 
 ## Chat tab layout
 
@@ -154,7 +155,10 @@ Header composition: join counted labels with `, `. Counts of 1 omit the `×N`. E
 └─────────────────────────────────────────┘
 
 Expanded: same header with ⌃, followed by one line per
-tool call showing the underlying message `text`.
+tool call showing the underlying message `text` in the
+mono font, allowed to wrap (no truncation) so outputs
+like "doc.parse(pdf) → 312 blocks, 27 tables" stay
+readable.
 ```
 
 - Rounded pill header, subtle gray background, left lightning icon, right chevron
@@ -180,7 +184,7 @@ tool call showing the underlying message `text`.
 
 - `textarea` — auto-grows between 2 and 6 rows
 - Placeholder is status-dependent:
-  - `done` task → *"Task finished — reply to re-open…"*
+  - `done` task → *"Task complete — send a note for the record…"*
   - others → *"Send a message to {agent.name}…"*
 - Left cluster: gear / paperclip / mic waveform / "Import" text button — all purely visual (click → `console.log`, no functionality)
 - Right: Send button with `▷` icon, `disabled` when `draft.trim() === ""`
@@ -190,9 +194,11 @@ tool call showing the underlying message `text`.
 
 Mirrors Roster's `ThreadCard`:
 
-1. Append `{ id, role: "user", text, ts: "just now" }` to drawer-local messages
-2. After 600ms, append `{ id, role: "agent", text: `Got it — incorporating your input into "${task.title}".`, ts: "just now" }`
+1. Append `{ id: ``${task.id}-u-${Date.now().toString(36)}``, role: "user", text, ts: "just now" }` to drawer-local messages
+2. After 600ms, append `{ id: ``${task.id}-a-${Date.now().toString(36)}``, role: "agent", text: `Got it — incorporating your input into "${task.title}".`, ts: "just now" }`
 3. Clear the draft, auto-scroll to bottom
+
+Placeholder for `done` tasks reads *"Task complete — send a note for the record…"* (the earlier "reply to re-open" phrasing is dropped — status changes are explicitly out of scope).
 
 Not done: changing `task.status`, writing into `agentThreads`, any real upload/voice/import wiring.
 
@@ -257,6 +263,7 @@ Bump the `?v=` query strings on `styles.css` and `data.js` to defeat CDN/browser
 - `.chat-bubble.r-user` — user bubble (right-aligned)
 - `.chat-system` — centered muted line
 - `.chat-composer-rich` — composer with four left icons + right Send
+- `.drawer.wide` — modifier that overrides `width` on top of the existing `.drawer` definition. `TaskDrawer` uses `<div className="drawer wide">...`; `AgentDrawer` is unchanged
 
 No existing selectors are renamed or removed.
 

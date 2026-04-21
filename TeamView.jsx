@@ -636,10 +636,12 @@ function TeamView({ view, setView, agents, tasks, edges, nodePos, topologies,
         </span>
       </div>
       <div className="right-body">
-        {view === "kanban" && <Kanban tasks={tasks} agents={agents}
-          onSelectAgent={onSelectAgent} onSelectTask={onSelectTask} store={store} />}
-        {view === "canvas" && <Canvas agents={agents} topologies={topologies} onSelectAgent={onSelectAgent} selectedId={selectedId} />}
-        {view === "roster" && <Roster agents={agents} tasks={tasks} threads={window.AppData?.agentThreads?.[currentSessionId] || {}} onSelectAgent={onSelectAgent} store={store} />}
+        <div key={view} className="rightview-swap">
+          {view === "kanban" && <Kanban tasks={tasks} agents={agents}
+            onSelectAgent={onSelectAgent} onSelectTask={onSelectTask} store={store} />}
+          {view === "canvas" && <Canvas agents={agents} topologies={topologies} onSelectAgent={onSelectAgent} selectedId={selectedId} />}
+          {view === "roster" && <Roster agents={agents} tasks={tasks} threads={window.AppData?.agentThreads?.[currentSessionId] || {}} onSelectAgent={onSelectAgent} store={store} />}
+        </div>
       </div>
     </div>
   );

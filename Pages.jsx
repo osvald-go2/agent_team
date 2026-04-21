@@ -450,8 +450,12 @@ function TemplatesPage({ store, onOpen }) {
 }
 
 /* ——— Sessions ——— */
-function SessionsPage({ store, currentProjectId, onOpenSession }) {
-  const sessions = store.state.sessions.filter(s => !currentProjectId || s.projectId === currentProjectId);
+function SessionsPage({ store, currentProjectId, onOpenSession, onQuickStart }) {
+  const all = store.state.sessions.filter(s => !currentProjectId || s.projectId === currentProjectId);
+  const [filter, setFilter] = React.useState("all");
+  const statuses = ["running", "idle", "archived"];
+  const shown = all.filter(s => filter === "all" || s.status === filter);
+  const crud = useCrud("sessions", store);
   return (
     <div className="page-wrap">
       <div className="page-head">
@@ -460,23 +464,69 @@ function SessionsPage({ store, currentProjectId, onOpenSession }) {
           <div className="sub">{currentProjectId ? "In current project" : "All sessions"}</div>
         </div>
       </div>
-      <div className="grid-card">
-        <table className="simple-table">
-          <thead><tr><th>Name</th><th>Status</th><th>Agents</th><th>Turns</th><th>Duration</th><th>When</th></tr></thead>
+      {onQuickStart && (
+        <QuickStartStrip
+          presets={window.QUICKSTART_PRESETS}
+          title="Quick start a session"
+          sub={currentProjectId ? "Kick off a new session in this project" : "Start from a template"}
+          onPick={onQuickStart}
+        />
+      )}
+      <div className="toolbar">
+        <button className={"filter-pill " + (filter === "all" ? "active" : "")} onClick={() => setFilter("all")}>All · {all.length}</button>
+        {statuses.map(st => (
+          <button key={st} className={"filter-pill " + (filter === st ? "active" : "")} onClick={() => setFilter(st)}>
+            {st} · {all.filter(s => s.status === st).length}
+          </button>
+        ))}
+      </div>
+      {shown.length === 0 ? (
+        <div className="empty-state">
+          {all.length === 0
+            ? "No sessions yet — pick a Quick start above to create your first one."
+            : `No ${filter} sessions.`}
+        </div>
+      ) : (
+        <table className="table">
+          <thead>
+            <tr>
+              <th style={{ width: "32%" }}>Session</th>
+              <th style={{ width: "10%" }}>Status</th>
+              <th style={{ width: "8%", textAlign: "right" }}>Agents</th>
+              <th style={{ width: "8%", textAlign: "right" }}>Turns</th>
+              <th style={{ width: "10%", textAlign: "right" }}>Duration</th>
+              <th style={{ width: "14%" }}>When</th>
+              <th style={{ width: "6%" }}></th>
+            </tr>
+          </thead>
           <tbody>
-            {sessions.map(s => (
+            {shown.map(s => (
               <tr key={s.id} onClick={() => onOpenSession(s.id)} style={{ cursor: "pointer" }}>
                 <td>{s.name}</td>
-                <td><span className={"status-pill s-" + s.status}>{s.status}</span></td>
-                <td>{s.agents}</td>
-                <td>{s.turns}</td>
-                <td>{s.duration}</td>
-                <td className="muted mono small">{s.when}</td>
+                <td><span className={"badge " + (s.status === "running" ? "s-running" : "")}>{s.status}</span></td>
+                <td className="mono" style={{ textAlign: "right" }}>{s.agents}</td>
+                <td className="mono" style={{ textAlign: "right" }}>{s.turns}</td>
+                <td className="mono" style={{ textAlign: "right" }}>{s.duration}</td>
+                <td className="muted mono">{s.when}</td>
+                <td onClick={e => e.stopPropagation()}>
+                  <RowMenu
+                    onView={() => onOpenSession(s.id)}
+                    onDuplicate={() => crud.duplicate(s)}
+                    onDelete={() => crud.askDelete(s)}
+                  />
+                </td>
               </tr>
             ))}
           </tbody>
         </table>
-      </div>
+      )}
+      <ConfirmDialog
+        open={!!crud.confirm}
+        title={`Delete ${crud.confirm?.name}?`}
+        body="This session will be removed from the workspace."
+        onConfirm={crud.confirmDelete}
+        onCancel={() => crud.setConfirm(null)}
+      />
     </div>
   );
 }
