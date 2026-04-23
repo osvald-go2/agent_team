@@ -172,17 +172,38 @@ SessionManager
 
 ### 5.1 Envelope
 
+Server → client events use the full envelope:
+
 ```ts
 export type WSEvent<T extends string = string, P = unknown> = {
   type: T;
-  seq: number;     // server-assigned, monotonic per WS connection
+  seq: number;     // server-assigned; see 5.1a below
   ts: number;      // unix ms
   payload: P;
 };
 ```
 
-Client → server messages use the same envelope shape but `seq` is
-server-assigned on broadcast echo; client may omit it on send.
+Client → server messages are bare `{ type, payload }` (no `seq` or `ts`) —
+clients never produce these fields. This keeps C2S lightweight and
+unambiguous.
+
+### 5.1a `seq` semantics
+
+- **Scope:** `seq` is monotonic per `(session, WS-connection)` pair. On a
+  new connection the counter restarts at 1 for that connection.
+- **Ring buffer:** the replay ring buffer is keyed by `sessionId` (not
+  connection). It stores the last 500 **non-heartbeat** events per session
+  along with the `seq` that was emitted on whichever connection was active
+  at the time. `heartbeat` events never enter the buffer.
+- **Reconnect:** on `sync { sessionId, sinceSeq }`, the server searches
+  the buffer for events with `seq > sinceSeq` that were emitted on the
+  **previous** connection. If found, it re-emits them under fresh `seq`
+  on the new connection (tagged with their original `seq` in payload-level
+  metadata when needed). If the buffer gap cannot be bridged, the server
+  responds with a fresh `session.ready` and the client discards any
+  partial in-flight state.
+- **Ordering guarantee:** for any given connection, all events belonging
+  to turn T precede every event belonging to turn T+1.
 
 ### 5.2 Client → Server events
 
@@ -302,7 +323,7 @@ export type SessionSummary = {
 
 | Case | Handling |
 |---|---|
-| WS drop mid-stream | Client reconnects, emits `sync { sessionId, sinceSeq }`; server replays events from its in-memory ring buffer (cap 500 events / session). If gap too large, server answers with fresh `session.ready` and client discards partial state. |
+| WS drop mid-stream | Client reconnects, emits `sync { sessionId, sinceSeq }`; server replays events from its in-memory ring buffer (cap 500 non-heartbeat events / session; `heartbeat` never consumes buffer capacity). If gap too large, server answers with fresh `session.ready` and client discards partial state. See 5.1a for exact seq semantics. |
 | Send while turn running | Server rejects with `error { code: "turn.already_running" }`. |
 | Cancel mid-generation | `turn.cancel` → server calls SDK AbortController → `turn.end { stopReason: "cancelled" }`. |
 | Provider rate limit | `error { code: "provider.rate_limit", retriable: true }`; session stays alive. |
@@ -357,6 +378,13 @@ exact SDK surface is verified at implementation time; translator is the
 single file that imports the SDK, so an SDK breaking change has one place
 to fix.
 
+**Subagent event nesting:** `AgentEvent.subagent_event.inner` is itself
+typed as `AgentEvent` (internal domain). The WS server (`session/manager`
++ `ws/connection`) is responsible for wrapping each `inner: AgentEvent`
+into the corresponding `inner: WSEvent` when broadcasting
+`subagent.event` over the wire. The translator only produces AgentEvents;
+the serialization boundary lives at the WS layer.
+
 ### 6.2 Session manager
 
 - Holds `activeSessionId: string | null` and `inFlightTurn: TurnState | null`.
@@ -391,6 +419,7 @@ CREATE TABLE IF NOT EXISTS messages (
   session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
   role TEXT NOT NULL,                 -- "user" | "assistant"
   blocks_json TEXT NOT NULL,          -- JSON-serialized Block[]
+  blocks_schema_version INTEGER NOT NULL DEFAULT 1,  -- bump when Block shape evolves
   turn_id TEXT,                       -- null for legacy, set for new rows
   stop_reason TEXT,                   -- only for assistant
   usage_json TEXT,                    -- JSON TokenUsage
