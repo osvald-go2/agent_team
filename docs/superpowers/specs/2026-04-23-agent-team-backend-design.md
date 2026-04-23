@@ -309,10 +309,10 @@ unambiguous.
 - **Reconnect:** on `sync { sessionId, sinceSeq }`, the server searches
   the buffer for events with `seq > sinceSeq` that were emitted on the
   **previous** connection. If found, it re-emits them under fresh `seq`
-  on the new connection (tagged with their original `seq` in payload-level
-  metadata when needed). If the buffer gap cannot be bridged, the server
-  responds with a fresh `session.ready` and the client discards any
-  partial in-flight state.
+  on the new connection; original seqs are not retained (the reducer
+  is idempotent over the event stream and does not need them). If the
+  buffer gap cannot be bridged, the server responds with a fresh
+  `session.ready` and the client discards any partial in-flight state.
 - **Ordering guarantee:** for any given connection, all events belonging
   to turn T precede every event belonging to turn T+1. Rollback events
   also follow this ordering: once `session.rollback.complete` has been
@@ -516,7 +516,10 @@ export type StartTurnInput = {
   userText: string;
   turnId: string;
   abortSignal: AbortSignal;
-  // history injected into a fresh provider session when providerSessionId is null
+  // Contract: TurnOrchestrator MUST pass the full Message[] history from the
+  // repository whenever providerSessionId is null (including the first turn,
+  // where history is simply []). The runner is DB-free and relies solely on
+  // what's injected here.
   replayHistory?: Message[];
 };
 
@@ -759,6 +762,11 @@ class RollbackService {
           workspaceDir(sessionId),
           target.post_turn_commit
         );
+        // Ordering is deliberate: emit rollback.complete ONLY after the git
+        // reset succeeds. Emitting before would lie to the client about
+        // workspace state, and the DB has already committed so a later
+        // failure to git-reset leaves the session in the "needs reconcile"
+        // state that startup recovery handles.
         bus.publish({
           type: "session.rollback.complete",
           payload: {
