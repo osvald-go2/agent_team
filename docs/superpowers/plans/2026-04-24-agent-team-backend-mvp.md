@@ -1799,4 +1799,1316 @@ All of the following must be true before starting Chunk 3:
 
 ---
 
-(Chunks 3 through 9 will be appended after Chunk 2 is reviewed and approved.)
+## Chunk 3: Database — Schema, Connection, Repository
+
+Goal of this chunk: create the SQLite schema that backs the MVP (spec §6.3 — sessions / turns / messages), open a typed connection via `better-sqlite3`, and expose a single `Repository` class with all the methods the spec's pseudocode references. The chunk ends with `index.ts` opening the DB at startup and a verifiable round-trip (insert a session, list it back) via integration tests using an in-memory database.
+
+### Task 14: Install `better-sqlite3`, write schema, open DB
+
+**Files:**
+- Modify: `packages/backend/package.json`
+- Create: `packages/backend/src/db/schema.sql`
+- Create: `packages/backend/src/db/connection.ts`
+- Create: `packages/backend/src/db/connection.test.ts`
+
+- [ ] **Step 1: Add `better-sqlite3` to `packages/backend/package.json`**
+
+Edit the `dependencies` and `devDependencies` blocks so they include:
+
+```json
+"dependencies": {
+  "@agent-team/shared": "workspace:*",
+  "better-sqlite3": "^11.5.0",
+  "dotenv": "^16.4.5",
+  "pino": "^9.5.0",
+  "ws": "^8.18.0"
+},
+"devDependencies": {
+  "@types/better-sqlite3": "^7.6.11",
+  "@types/node": "^22.5.4",
+  "@types/ws": "^8.5.12",
+  "tsx": "^4.19.1",
+  "typescript": "^5.5.4",
+  "vitest": "^2.1.1"
+}
+```
+
+Run:
+```bash
+pnpm install
+```
+Expected: installs; prebuilt binary for your platform is fetched (no local `python`/`node-gyp` build needed on macOS/Linux/Windows Node 20+). If it falls back to `node-gyp`, make sure `python3` and a C++ toolchain are available; on macOS: `xcode-select --install`.
+
+- [ ] **Step 2: Write `packages/backend/src/db/schema.sql`** (verbatim from spec §6.3)
+
+```sql
+CREATE TABLE IF NOT EXISTS sessions (
+  id TEXT PRIMARY KEY,
+  title TEXT NOT NULL,
+  agent TEXT NOT NULL,
+  model TEXT NOT NULL,
+  provider_session_id TEXT,
+  system_prompt TEXT,
+  cwd TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  last_message_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS turns (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  sequence_num INTEGER NOT NULL,
+  status TEXT NOT NULL,
+  stop_reason TEXT,
+  usage_json TEXT,
+  pre_turn_commit TEXT NOT NULL,
+  post_turn_commit TEXT,
+  first_user_text TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  completed_at INTEGER
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_turns_session_seq
+  ON turns(session_id, sequence_num);
+CREATE INDEX IF NOT EXISTS idx_turns_session_status
+  ON turns(session_id, status);
+
+CREATE TABLE IF NOT EXISTS messages (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  turn_id TEXT NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
+  role TEXT NOT NULL,
+  blocks_json TEXT NOT NULL,
+  blocks_schema_version INTEGER NOT NULL DEFAULT 1,
+  stop_reason TEXT,
+  usage_json TEXT,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_messages_session_created
+  ON messages(session_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_messages_turn
+  ON messages(turn_id);
+```
+
+- [ ] **Step 3: Write the failing DB connection test**
+
+Create `packages/backend/src/db/connection.test.ts`:
+
+```ts
+import { describe, expect, it } from "vitest";
+import { openDb } from "./connection.js";
+
+describe("openDb", () => {
+  it("opens an in-memory database and applies the schema", () => {
+    const db = openDb(":memory:");
+    const rows = db
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+      .all() as { name: string }[];
+    const names = rows.map((r) => r.name);
+    expect(names).toContain("sessions");
+    expect(names).toContain("turns");
+    expect(names).toContain("messages");
+    db.close();
+  });
+
+  it("enables foreign_keys pragma", () => {
+    const db = openDb(":memory:");
+    const row = db.prepare("PRAGMA foreign_keys").get() as { foreign_keys: number };
+    expect(row.foreign_keys).toBe(1);
+    db.close();
+  });
+
+  it("is idempotent — running schema twice does not throw", () => {
+    const db = openDb(":memory:");
+    // Re-run schema file directly; connection.ts uses IF NOT EXISTS so this is safe.
+    expect(() => {
+      db.prepare("CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY)").run();
+    }).not.toThrow();
+    db.close();
+  });
+});
+```
+
+- [ ] **Step 4: Run the test and confirm it fails**
+
+Run:
+```bash
+pnpm --filter @agent-team/backend test
+```
+Expected: FAIL — `./connection.js` does not exist.
+
+- [ ] **Step 5: Implement `packages/backend/src/db/connection.ts`**
+
+```ts
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import Database from "better-sqlite3";
+
+export type Db = Database.Database;
+
+const MODULE_DIR = dirname(fileURLToPath(import.meta.url));
+const SCHEMA_PATH = join(MODULE_DIR, "schema.sql");
+// Read once at module load — schema.sql is copied next to the compiled JS.
+const SCHEMA_SQL = readFileSync(SCHEMA_PATH, "utf8");
+
+export function openDb(path: string): Db {
+  const db = new Database(path);
+  db.pragma("journal_mode = WAL");
+  db.pragma("foreign_keys = ON");
+  db.pragma("synchronous = NORMAL");
+  db.exec(SCHEMA_SQL);
+  return db;
+}
+```
+
+- [ ] **Step 6: Ensure `schema.sql` is copied into `dist/` on build**
+
+Edit `packages/backend/tsconfig.json` to add a `include` for the SQL file is not enough — TypeScript will not copy non-TS assets. Instead, change the build script in `packages/backend/package.json`:
+
+```json
+"scripts": {
+  "build": "tsc -b && node -e \"require('node:fs').cpSync('src/db/schema.sql','dist/db/schema.sql')\"",
+  "clean": "rm -rf dist tsconfig.tsbuildinfo",
+  "dev": "tsx watch src/index.ts",
+  "start": "node dist/index.js",
+  "test": "vitest run"
+}
+```
+
+Note: `vitest` runs TS directly via its own loader, so tests find `schema.sql` relative to `src/db/`; the post-build copy only matters for `node dist/index.js`. Document this in a comment above `SCHEMA_PATH` if you prefer — but the current code uses `import.meta.url`, which resolves correctly in both `src/` and `dist/` contexts because the SQL file sits alongside the module.
+
+- [ ] **Step 7: Run the test and confirm it passes**
+
+Run:
+```bash
+pnpm --filter @agent-team/backend test
+```
+Expected: PASS — all 3 connection tests green.
+
+- [ ] **Step 8: Commit**
+
+```bash
+git add packages/backend/package.json pnpm-lock.yaml \
+  packages/backend/src/db/schema.sql \
+  packages/backend/src/db/connection.ts \
+  packages/backend/src/db/connection.test.ts
+git commit -m "feat(backend): add SQLite schema + typed connection"
+```
+
+### Task 15: Sessions repository
+
+**Files:**
+- Create: `packages/backend/src/db/types.ts`
+- Create: `packages/backend/src/db/repository.ts`
+- Create: `packages/backend/src/db/sessions.test.ts`
+
+- [ ] **Step 1: Write `packages/backend/src/db/types.ts`** (DB row + insert DTO types)
+
+```ts
+import type { StopReason, TokenUsage } from "@agent-team/shared";
+
+export type SessionRow = {
+  id: string;
+  title: string;
+  agent: string;
+  model: string;
+  providerSessionId: string | null;
+  systemPrompt: string | null;
+  cwd: string;
+  createdAt: number;
+  lastMessageAt: number;
+};
+
+export type NewSession = Omit<SessionRow, "lastMessageAt"> & {
+  lastMessageAt?: number;
+};
+
+export type TurnStatus =
+  | "in_progress"
+  | "completed"
+  | "cancelled"
+  | "error"
+  | "orphaned";
+
+export type TurnRow = {
+  id: string;
+  sessionId: string;
+  sequenceNum: number;
+  status: TurnStatus;
+  stopReason: StopReason | null;
+  usage: TokenUsage | null;
+  preTurnCommit: string;
+  postTurnCommit: string | null;
+  firstUserText: string;
+  createdAt: number;
+  completedAt: number | null;
+};
+
+export type NewTurn = Omit<TurnRow, "postTurnCommit" | "completedAt" | "stopReason" | "usage"> & {
+  postTurnCommit?: string | null;
+  completedAt?: number | null;
+  stopReason?: StopReason | null;
+  usage?: TokenUsage | null;
+};
+
+export type TurnPatch = Partial<
+  Pick<TurnRow, "status" | "stopReason" | "usage" | "postTurnCommit" | "completedAt">
+>;
+
+export type MessageRow = {
+  id: string;
+  sessionId: string;
+  turnId: string;
+  role: "user" | "assistant";
+  blocksJson: string;                  // JSON of Block[]
+  blocksSchemaVersion: number;
+  stopReason: StopReason | null;
+  usage: TokenUsage | null;
+  createdAt: number;
+};
+
+export type NewMessage = Omit<MessageRow, "blocksSchemaVersion" | "stopReason" | "usage"> & {
+  blocksSchemaVersion?: number;
+  stopReason?: StopReason | null;
+  usage?: TokenUsage | null;
+};
+```
+
+- [ ] **Step 2: Write the failing sessions test**
+
+Create `packages/backend/src/db/sessions.test.ts`:
+
+```ts
+import { beforeEach, describe, expect, it } from "vitest";
+import { openDb, type Db } from "./connection.js";
+import { Repository } from "./repository.js";
+
+describe("Repository — sessions", () => {
+  let db: Db;
+  let repo: Repository;
+
+  beforeEach(() => {
+    db = openDb(":memory:");
+    repo = new Repository(db);
+  });
+
+  it("creates and retrieves a session", () => {
+    repo.createSession({
+      id: "s1",
+      title: "Test",
+      agent: "claude",
+      model: "claude-sonnet-4-6",
+      providerSessionId: null,
+      systemPrompt: null,
+      cwd: "/tmp/s1",
+      createdAt: 100,
+    });
+    const got = repo.getSession("s1");
+    expect(got?.id).toBe("s1");
+    expect(got?.providerSessionId).toBeNull();
+    expect(got?.lastMessageAt).toBe(100);
+  });
+
+  it("lists sessions with message and turn counts (zero to start)", () => {
+    repo.createSession({
+      id: "a",
+      title: "A",
+      agent: "claude",
+      model: "m",
+      providerSessionId: null,
+      systemPrompt: null,
+      cwd: "/a",
+      createdAt: 1,
+    });
+    const list = repo.listSessions();
+    expect(list).toHaveLength(1);
+    expect(list[0]!.id).toBe("a");
+    expect(list[0]!.messageCount).toBe(0);
+    expect(list[0]!.turnCount).toBe(0);
+  });
+
+  it("updates and clears provider_session_id", () => {
+    repo.createSession({
+      id: "s1",
+      title: "T",
+      agent: "claude",
+      model: "m",
+      providerSessionId: null,
+      systemPrompt: null,
+      cwd: "/s1",
+      createdAt: 0,
+    });
+    repo.updateProviderSessionId("s1", "claude-abc");
+    expect(repo.getSession("s1")?.providerSessionId).toBe("claude-abc");
+    repo.clearProviderSessionId("s1");
+    expect(repo.getSession("s1")?.providerSessionId).toBeNull();
+  });
+
+  it("allSessions returns the raw rows without counts", () => {
+    repo.createSession({
+      id: "s1",
+      title: "T",
+      agent: "claude",
+      model: "m",
+      providerSessionId: null,
+      systemPrompt: null,
+      cwd: "/s1",
+      createdAt: 0,
+    });
+    const all = repo.allSessions();
+    expect(all).toHaveLength(1);
+    expect(all[0]!.id).toBe("s1");
+  });
+
+  it("getSession returns null for missing id", () => {
+    expect(repo.getSession("nope")).toBeNull();
+  });
+});
+```
+
+- [ ] **Step 3: Run the test and confirm it fails**
+
+Run:
+```bash
+pnpm --filter @agent-team/backend test
+```
+Expected: FAIL — `./repository.js` does not exist.
+
+- [ ] **Step 4: Implement `packages/backend/src/db/repository.ts` with sessions only (turns + messages added in Tasks 16–17)**
+
+```ts
+import type { SessionSummary } from "@agent-team/shared";
+import type { Db } from "./connection.js";
+import type { NewSession, SessionRow } from "./types.js";
+
+type SessionDbRow = {
+  id: string;
+  title: string;
+  agent: string;
+  model: string;
+  provider_session_id: string | null;
+  system_prompt: string | null;
+  cwd: string;
+  created_at: number;
+  last_message_at: number;
+};
+
+function rowToSession(r: SessionDbRow): SessionRow {
+  return {
+    id: r.id,
+    title: r.title,
+    agent: r.agent,
+    model: r.model,
+    providerSessionId: r.provider_session_id,
+    systemPrompt: r.system_prompt,
+    cwd: r.cwd,
+    createdAt: r.created_at,
+    lastMessageAt: r.last_message_at,
+  };
+}
+
+export class Repository {
+  constructor(private readonly db: Db) {}
+
+  // ==== Sessions ====
+
+  createSession(input: NewSession): void {
+    this.db
+      .prepare(
+        `INSERT INTO sessions (id, title, agent, model, provider_session_id,
+           system_prompt, cwd, created_at, last_message_at)
+         VALUES (@id, @title, @agent, @model, @providerSessionId,
+           @systemPrompt, @cwd, @createdAt, @lastMessageAt)`,
+      )
+      .run({
+        ...input,
+        lastMessageAt: input.lastMessageAt ?? input.createdAt,
+      });
+  }
+
+  getSession(id: string): SessionRow | null {
+    const r = this.db
+      .prepare(`SELECT * FROM sessions WHERE id = ?`)
+      .get(id) as SessionDbRow | undefined;
+    return r ? rowToSession(r) : null;
+  }
+
+  allSessions(): SessionRow[] {
+    const rs = this.db
+      .prepare(`SELECT * FROM sessions ORDER BY last_message_at DESC`)
+      .all() as SessionDbRow[];
+    return rs.map(rowToSession);
+  }
+
+  listSessions(): SessionSummary[] {
+    const rows = this.db
+      .prepare(
+        `SELECT s.*,
+                (SELECT COUNT(*) FROM messages m WHERE m.session_id = s.id) AS msg_count,
+                (SELECT COUNT(*) FROM turns t WHERE t.session_id = s.id)   AS turn_count
+         FROM sessions s
+         ORDER BY s.last_message_at DESC`,
+      )
+      .all() as (SessionDbRow & { msg_count: number; turn_count: number })[];
+    return rows.map((r) => ({
+      id: r.id,
+      title: r.title,
+      agent: r.agent,
+      model: r.model,
+      lastMessageAt: r.last_message_at,
+      messageCount: r.msg_count,
+      turnCount: r.turn_count,
+    }));
+  }
+
+  updateProviderSessionId(sessionId: string, providerSessionId: string): void {
+    this.db
+      .prepare(`UPDATE sessions SET provider_session_id = ? WHERE id = ?`)
+      .run(providerSessionId, sessionId);
+  }
+
+  clearProviderSessionId(sessionId: string): void {
+    this.db
+      .prepare(`UPDATE sessions SET provider_session_id = NULL WHERE id = ?`)
+      .run(sessionId);
+  }
+
+  runTx<T>(fn: () => T): T {
+    const tx = this.db.transaction(fn);
+    return tx();
+  }
+}
+```
+
+- [ ] **Step 5: Run the test and confirm it passes**
+
+Run:
+```bash
+pnpm --filter @agent-team/backend test
+```
+Expected: PASS — all 5 sessions cases green.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add packages/backend/src/db/types.ts \
+        packages/backend/src/db/repository.ts \
+        packages/backend/src/db/sessions.test.ts
+git commit -m "feat(backend): add Repository with sessions CRUD"
+```
+
+### Task 16: Turns repository methods
+
+**Files:**
+- Modify: `packages/backend/src/db/repository.ts`
+- Create: `packages/backend/src/db/turns.test.ts`
+
+- [ ] **Step 1: Write the failing turns test**
+
+Create `packages/backend/src/db/turns.test.ts`:
+
+```ts
+import { beforeEach, describe, expect, it } from "vitest";
+import { openDb, type Db } from "./connection.js";
+import { Repository } from "./repository.js";
+
+const seedSession = (r: Repository, id = "s1") => {
+  r.createSession({
+    id,
+    title: "T",
+    agent: "claude",
+    model: "m",
+    providerSessionId: null,
+    systemPrompt: null,
+    cwd: `/${id}`,
+    createdAt: 0,
+  });
+};
+
+describe("Repository — turns", () => {
+  let db: Db;
+  let repo: Repository;
+
+  beforeEach(() => {
+    db = openDb(":memory:");
+    repo = new Repository(db);
+    seedSession(repo);
+  });
+
+  it("inserts and retrieves a turn", () => {
+    repo.insertTurn({
+      id: "t1",
+      sessionId: "s1",
+      sequenceNum: 1,
+      status: "in_progress",
+      preTurnCommit: "abc",
+      firstUserText: "hello",
+      createdAt: 10,
+    });
+    const got = repo.getTurn("t1");
+    expect(got?.status).toBe("in_progress");
+    expect(got?.postTurnCommit).toBeNull();
+    expect(got?.stopReason).toBeNull();
+  });
+
+  it("lists turns by session ordered by sequence_num asc", () => {
+    repo.insertTurn({
+      id: "t2",
+      sessionId: "s1",
+      sequenceNum: 2,
+      status: "completed",
+      preTurnCommit: "x",
+      firstUserText: "b",
+      createdAt: 20,
+    });
+    repo.insertTurn({
+      id: "t1",
+      sessionId: "s1",
+      sequenceNum: 1,
+      status: "completed",
+      preTurnCommit: "x",
+      firstUserText: "a",
+      createdAt: 10,
+    });
+    const list = repo.listTurnsBySession("s1");
+    expect(list.map((t) => t.id)).toEqual(["t1", "t2"]);
+  });
+
+  it("latestTurn returns the highest sequence_num", () => {
+    for (const [id, seq] of [["t1", 1], ["t2", 3], ["t3", 2]] as const) {
+      repo.insertTurn({
+        id,
+        sessionId: "s1",
+        sequenceNum: seq,
+        status: "completed",
+        preTurnCommit: "c",
+        firstUserText: "u",
+        createdAt: seq,
+      });
+    }
+    expect(repo.latestTurn("s1")?.id).toBe("t2");
+  });
+
+  it("turnsAfter returns turns with sequence_num > n", () => {
+    for (let seq = 1; seq <= 3; seq++) {
+      repo.insertTurn({
+        id: `t${seq}`,
+        sessionId: "s1",
+        sequenceNum: seq,
+        status: "completed",
+        preTurnCommit: "c",
+        firstUserText: "u",
+        createdAt: seq,
+      });
+    }
+    const after = repo.turnsAfter("s1", 1);
+    expect(after.map((t) => t.id)).toEqual(["t2", "t3"]);
+  });
+
+  it("turnsByStatus filters by status", () => {
+    repo.insertTurn({
+      id: "t1",
+      sessionId: "s1",
+      sequenceNum: 1,
+      status: "in_progress",
+      preTurnCommit: "c",
+      firstUserText: "u",
+      createdAt: 1,
+    });
+    repo.insertTurn({
+      id: "t2",
+      sessionId: "s1",
+      sequenceNum: 2,
+      status: "completed",
+      preTurnCommit: "c",
+      firstUserText: "u",
+      createdAt: 2,
+    });
+    expect(repo.turnsByStatus("s1", "in_progress").map((t) => t.id)).toEqual(["t1"]);
+    expect(repo.turnsByStatus("s1", "completed").map((t) => t.id)).toEqual(["t2"]);
+  });
+
+  it("updateTurn patches the status, stop_reason, usage, post_turn_commit, completed_at", () => {
+    repo.insertTurn({
+      id: "t1",
+      sessionId: "s1",
+      sequenceNum: 1,
+      status: "in_progress",
+      preTurnCommit: "c",
+      firstUserText: "u",
+      createdAt: 1,
+    });
+    repo.updateTurn("t1", {
+      status: "completed",
+      stopReason: "end_turn",
+      usage: { inputTokens: 10, outputTokens: 5 },
+      postTurnCommit: "after",
+      completedAt: 42,
+    });
+    const got = repo.getTurn("t1")!;
+    expect(got.status).toBe("completed");
+    expect(got.stopReason).toBe("end_turn");
+    expect(got.usage).toEqual({ inputTokens: 10, outputTokens: 5 });
+    expect(got.postTurnCommit).toBe("after");
+    expect(got.completedAt).toBe(42);
+  });
+
+  it("deleteTurns removes turns and cascades referenced messages", () => {
+    repo.insertTurn({
+      id: "t1",
+      sessionId: "s1",
+      sequenceNum: 1,
+      status: "completed",
+      preTurnCommit: "c",
+      firstUserText: "u",
+      createdAt: 1,
+    });
+    repo.insertMessage({
+      id: "m1",
+      sessionId: "s1",
+      turnId: "t1",
+      role: "user",
+      blocksJson: "[]",
+      createdAt: 1,
+    });
+    repo.deleteTurns(["t1"]);
+    expect(repo.getTurn("t1")).toBeNull();
+    expect(repo.listMessagesBySession("s1")).toHaveLength(0);
+  });
+});
+```
+
+- [ ] **Step 2: Run the test and confirm it fails**
+
+Run:
+```bash
+pnpm --filter @agent-team/backend test
+```
+Expected: FAIL — `Repository` does not yet have `insertTurn / getTurn / …`. Also `insertMessage / listMessagesBySession` are referenced; they are implemented in Task 17 but we add their stubs in Task 16 Step 3 to keep the single-file repository linearly growable.
+
+- [ ] **Step 3: Extend `packages/backend/src/db/repository.ts` with turns + message stubs**
+
+Append to `repository.ts` (do NOT delete the existing sessions section):
+
+```ts
+// ==== Turns ====
+
+type TurnDbRow = {
+  id: string;
+  session_id: string;
+  sequence_num: number;
+  status: string;
+  stop_reason: string | null;
+  usage_json: string | null;
+  pre_turn_commit: string;
+  post_turn_commit: string | null;
+  first_user_text: string;
+  created_at: number;
+  completed_at: number | null;
+};
+
+function rowToTurn(r: TurnDbRow): TurnRow {
+  return {
+    id: r.id,
+    sessionId: r.session_id,
+    sequenceNum: r.sequence_num,
+    status: r.status as TurnRow["status"],
+    stopReason: (r.stop_reason as TurnRow["stopReason"]) ?? null,
+    usage: r.usage_json ? (JSON.parse(r.usage_json) as TurnRow["usage"]) : null,
+    preTurnCommit: r.pre_turn_commit,
+    postTurnCommit: r.post_turn_commit,
+    firstUserText: r.first_user_text,
+    createdAt: r.created_at,
+    completedAt: r.completed_at,
+  };
+}
+
+declare module "./repository.js" {}
+
+// Append these methods INSIDE the Repository class by opening it again:
+```
+
+Because TypeScript does not support partial class bodies, do not use the `declare module` trick above — the correct approach is to put everything into a single class body. Replace `packages/backend/src/db/repository.ts` **entirely** with the content below, which combines sessions (Task 15) + turns (this task) + the stubs required for the Task 16 test to link (message CRUD gets real in Task 17):
+
+```ts
+import type { SessionSummary } from "@agent-team/shared";
+import type { Db } from "./connection.js";
+import type {
+  MessageRow,
+  NewMessage,
+  NewSession,
+  NewTurn,
+  SessionRow,
+  TurnPatch,
+  TurnRow,
+  TurnStatus,
+} from "./types.js";
+
+type SessionDbRow = {
+  id: string;
+  title: string;
+  agent: string;
+  model: string;
+  provider_session_id: string | null;
+  system_prompt: string | null;
+  cwd: string;
+  created_at: number;
+  last_message_at: number;
+};
+
+type TurnDbRow = {
+  id: string;
+  session_id: string;
+  sequence_num: number;
+  status: string;
+  stop_reason: string | null;
+  usage_json: string | null;
+  pre_turn_commit: string;
+  post_turn_commit: string | null;
+  first_user_text: string;
+  created_at: number;
+  completed_at: number | null;
+};
+
+type MessageDbRow = {
+  id: string;
+  session_id: string;
+  turn_id: string;
+  role: string;
+  blocks_json: string;
+  blocks_schema_version: number;
+  stop_reason: string | null;
+  usage_json: string | null;
+  created_at: number;
+};
+
+function rowToSession(r: SessionDbRow): SessionRow {
+  return {
+    id: r.id,
+    title: r.title,
+    agent: r.agent,
+    model: r.model,
+    providerSessionId: r.provider_session_id,
+    systemPrompt: r.system_prompt,
+    cwd: r.cwd,
+    createdAt: r.created_at,
+    lastMessageAt: r.last_message_at,
+  };
+}
+
+function rowToTurn(r: TurnDbRow): TurnRow {
+  return {
+    id: r.id,
+    sessionId: r.session_id,
+    sequenceNum: r.sequence_num,
+    status: r.status as TurnRow["status"],
+    stopReason: (r.stop_reason as TurnRow["stopReason"]) ?? null,
+    usage: r.usage_json ? (JSON.parse(r.usage_json) as TurnRow["usage"]) : null,
+    preTurnCommit: r.pre_turn_commit,
+    postTurnCommit: r.post_turn_commit,
+    firstUserText: r.first_user_text,
+    createdAt: r.created_at,
+    completedAt: r.completed_at,
+  };
+}
+
+function rowToMessage(r: MessageDbRow): MessageRow {
+  return {
+    id: r.id,
+    sessionId: r.session_id,
+    turnId: r.turn_id,
+    role: r.role as MessageRow["role"],
+    blocksJson: r.blocks_json,
+    blocksSchemaVersion: r.blocks_schema_version,
+    stopReason: (r.stop_reason as MessageRow["stopReason"]) ?? null,
+    usage: r.usage_json ? (JSON.parse(r.usage_json) as MessageRow["usage"]) : null,
+    createdAt: r.created_at,
+  };
+}
+
+export class Repository {
+  constructor(private readonly db: Db) {}
+
+  // ==== Sessions ====
+
+  createSession(input: NewSession): void {
+    this.db
+      .prepare(
+        `INSERT INTO sessions (id, title, agent, model, provider_session_id,
+           system_prompt, cwd, created_at, last_message_at)
+         VALUES (@id, @title, @agent, @model, @providerSessionId,
+           @systemPrompt, @cwd, @createdAt, @lastMessageAt)`,
+      )
+      .run({
+        ...input,
+        lastMessageAt: input.lastMessageAt ?? input.createdAt,
+      });
+  }
+
+  getSession(id: string): SessionRow | null {
+    const r = this.db
+      .prepare(`SELECT * FROM sessions WHERE id = ?`)
+      .get(id) as SessionDbRow | undefined;
+    return r ? rowToSession(r) : null;
+  }
+
+  allSessions(): SessionRow[] {
+    const rs = this.db
+      .prepare(`SELECT * FROM sessions ORDER BY last_message_at DESC`)
+      .all() as SessionDbRow[];
+    return rs.map(rowToSession);
+  }
+
+  listSessions(): SessionSummary[] {
+    const rows = this.db
+      .prepare(
+        `SELECT s.*,
+                (SELECT COUNT(*) FROM messages m WHERE m.session_id = s.id) AS msg_count,
+                (SELECT COUNT(*) FROM turns t WHERE t.session_id = s.id)   AS turn_count
+         FROM sessions s
+         ORDER BY s.last_message_at DESC`,
+      )
+      .all() as (SessionDbRow & { msg_count: number; turn_count: number })[];
+    return rows.map((r) => ({
+      id: r.id,
+      title: r.title,
+      agent: r.agent,
+      model: r.model,
+      lastMessageAt: r.last_message_at,
+      messageCount: r.msg_count,
+      turnCount: r.turn_count,
+    }));
+  }
+
+  updateProviderSessionId(sessionId: string, providerSessionId: string): void {
+    this.db
+      .prepare(`UPDATE sessions SET provider_session_id = ? WHERE id = ?`)
+      .run(providerSessionId, sessionId);
+  }
+
+  clearProviderSessionId(sessionId: string): void {
+    this.db
+      .prepare(`UPDATE sessions SET provider_session_id = NULL WHERE id = ?`)
+      .run(sessionId);
+  }
+
+  // ==== Turns ====
+
+  insertTurn(input: NewTurn): void {
+    this.db
+      .prepare(
+        `INSERT INTO turns (id, session_id, sequence_num, status, stop_reason,
+           usage_json, pre_turn_commit, post_turn_commit, first_user_text,
+           created_at, completed_at)
+         VALUES (@id, @sessionId, @sequenceNum, @status, @stopReason,
+           @usageJson, @preTurnCommit, @postTurnCommit, @firstUserText,
+           @createdAt, @completedAt)`,
+      )
+      .run({
+        id: input.id,
+        sessionId: input.sessionId,
+        sequenceNum: input.sequenceNum,
+        status: input.status,
+        stopReason: input.stopReason ?? null,
+        usageJson: input.usage ? JSON.stringify(input.usage) : null,
+        preTurnCommit: input.preTurnCommit,
+        postTurnCommit: input.postTurnCommit ?? null,
+        firstUserText: input.firstUserText,
+        createdAt: input.createdAt,
+        completedAt: input.completedAt ?? null,
+      });
+  }
+
+  getTurn(id: string): TurnRow | null {
+    const r = this.db
+      .prepare(`SELECT * FROM turns WHERE id = ?`)
+      .get(id) as TurnDbRow | undefined;
+    return r ? rowToTurn(r) : null;
+  }
+
+  listTurnsBySession(sessionId: string): TurnRow[] {
+    const rs = this.db
+      .prepare(
+        `SELECT * FROM turns WHERE session_id = ? ORDER BY sequence_num ASC`,
+      )
+      .all(sessionId) as TurnDbRow[];
+    return rs.map(rowToTurn);
+  }
+
+  latestTurn(sessionId: string): TurnRow | null {
+    const r = this.db
+      .prepare(
+        `SELECT * FROM turns WHERE session_id = ?
+         ORDER BY sequence_num DESC LIMIT 1`,
+      )
+      .get(sessionId) as TurnDbRow | undefined;
+    return r ? rowToTurn(r) : null;
+  }
+
+  turnsAfter(sessionId: string, sequenceNum: number): TurnRow[] {
+    const rs = this.db
+      .prepare(
+        `SELECT * FROM turns WHERE session_id = ? AND sequence_num > ?
+         ORDER BY sequence_num ASC`,
+      )
+      .all(sessionId, sequenceNum) as TurnDbRow[];
+    return rs.map(rowToTurn);
+  }
+
+  turnsByStatus(sessionId: string, status: TurnStatus): TurnRow[] {
+    const rs = this.db
+      .prepare(
+        `SELECT * FROM turns WHERE session_id = ? AND status = ?
+         ORDER BY sequence_num ASC`,
+      )
+      .all(sessionId, status) as TurnDbRow[];
+    return rs.map(rowToTurn);
+  }
+
+  updateTurn(id: string, patch: TurnPatch): void {
+    const sets: string[] = [];
+    const params: Record<string, unknown> = { id };
+    if (patch.status !== undefined) {
+      sets.push("status = @status");
+      params.status = patch.status;
+    }
+    if (patch.stopReason !== undefined) {
+      sets.push("stop_reason = @stopReason");
+      params.stopReason = patch.stopReason;
+    }
+    if (patch.usage !== undefined) {
+      sets.push("usage_json = @usageJson");
+      params.usageJson = patch.usage ? JSON.stringify(patch.usage) : null;
+    }
+    if (patch.postTurnCommit !== undefined) {
+      sets.push("post_turn_commit = @postTurnCommit");
+      params.postTurnCommit = patch.postTurnCommit;
+    }
+    if (patch.completedAt !== undefined) {
+      sets.push("completed_at = @completedAt");
+      params.completedAt = patch.completedAt;
+    }
+    if (sets.length === 0) return;
+    this.db
+      .prepare(`UPDATE turns SET ${sets.join(", ")} WHERE id = @id`)
+      .run(params);
+  }
+
+  deleteTurns(ids: string[]): void {
+    if (ids.length === 0) return;
+    const placeholders = ids.map(() => "?").join(",");
+    this.db
+      .prepare(`DELETE FROM turns WHERE id IN (${placeholders})`)
+      .run(...ids);
+  }
+
+  // ==== Messages (stub — real impl in Task 17) ====
+
+  insertMessage(input: NewMessage): void {
+    this.db
+      .prepare(
+        `INSERT INTO messages (id, session_id, turn_id, role, blocks_json,
+           blocks_schema_version, stop_reason, usage_json, created_at)
+         VALUES (@id, @sessionId, @turnId, @role, @blocksJson,
+           @blocksSchemaVersion, @stopReason, @usageJson, @createdAt)`,
+      )
+      .run({
+        id: input.id,
+        sessionId: input.sessionId,
+        turnId: input.turnId,
+        role: input.role,
+        blocksJson: input.blocksJson,
+        blocksSchemaVersion: input.blocksSchemaVersion ?? 1,
+        stopReason: input.stopReason ?? null,
+        usageJson: input.usage ? JSON.stringify(input.usage) : null,
+        createdAt: input.createdAt,
+      });
+    this.db
+      .prepare(`UPDATE sessions SET last_message_at = ? WHERE id = ?`)
+      .run(input.createdAt, input.sessionId);
+  }
+
+  listMessagesBySession(sessionId: string): MessageRow[] {
+    const rs = this.db
+      .prepare(
+        `SELECT * FROM messages WHERE session_id = ? ORDER BY created_at ASC, id ASC`,
+      )
+      .all(sessionId) as MessageDbRow[];
+    return rs.map(rowToMessage);
+  }
+
+  // ==== Transactions ====
+
+  runTx<T>(fn: () => T): T {
+    return this.db.transaction(fn)();
+  }
+}
+```
+
+- [ ] **Step 4: Run the test and confirm it passes**
+
+Run:
+```bash
+pnpm --filter @agent-team/backend test
+```
+Expected: PASS — all 7 turns cases green, existing sessions cases still green.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add packages/backend/src/db/repository.ts packages/backend/src/db/turns.test.ts
+git commit -m "feat(backend): add turns CRUD + message stubs in Repository"
+```
+
+### Task 17: Messages repository tests (formalize)
+
+**Files:**
+- Create: `packages/backend/src/db/messages.test.ts`
+
+The message CRUD methods were added to `repository.ts` in Task 16 (because `deleteTurns`'s cascade test needed them). Task 17 adds a dedicated test file that exercises the messages-specific behavior end-to-end.
+
+- [ ] **Step 1: Write the failing messages test**
+
+Create `packages/backend/src/db/messages.test.ts`:
+
+```ts
+import { beforeEach, describe, expect, it } from "vitest";
+import { openDb, type Db } from "./connection.js";
+import { Repository } from "./repository.js";
+
+const seed = (r: Repository) => {
+  r.createSession({
+    id: "s1",
+    title: "T",
+    agent: "claude",
+    model: "m",
+    providerSessionId: null,
+    systemPrompt: null,
+    cwd: "/s1",
+    createdAt: 0,
+  });
+  r.insertTurn({
+    id: "t1",
+    sessionId: "s1",
+    sequenceNum: 1,
+    status: "in_progress",
+    preTurnCommit: "c",
+    firstUserText: "u",
+    createdAt: 1,
+  });
+};
+
+describe("Repository — messages", () => {
+  let db: Db;
+  let repo: Repository;
+
+  beforeEach(() => {
+    db = openDb(":memory:");
+    repo = new Repository(db);
+    seed(repo);
+  });
+
+  it("inserts a user message and bumps session.last_message_at", () => {
+    repo.insertMessage({
+      id: "m1",
+      sessionId: "s1",
+      turnId: "t1",
+      role: "user",
+      blocksJson: JSON.stringify([{ type: "text", text: "hi" }]),
+      createdAt: 100,
+    });
+    const s = repo.getSession("s1")!;
+    expect(s.lastMessageAt).toBe(100);
+  });
+
+  it("persists and re-hydrates a Block[] via blocksJson round-trip", () => {
+    const blocks = [
+      { type: "text", text: "a" },
+      { type: "thinking", text: "b" },
+      { type: "tool_use", toolCallId: "c", name: "Bash", input: { cmd: "ls" } },
+    ];
+    repo.insertMessage({
+      id: "m1",
+      sessionId: "s1",
+      turnId: "t1",
+      role: "assistant",
+      blocksJson: JSON.stringify(blocks),
+      createdAt: 50,
+    });
+    const got = repo.listMessagesBySession("s1");
+    expect(got).toHaveLength(1);
+    expect(JSON.parse(got[0]!.blocksJson)).toEqual(blocks);
+    expect(got[0]!.blocksSchemaVersion).toBe(1);
+  });
+
+  it("orders messages by created_at ASC within a session", () => {
+    repo.insertMessage({
+      id: "m2",
+      sessionId: "s1",
+      turnId: "t1",
+      role: "assistant",
+      blocksJson: "[]",
+      createdAt: 20,
+    });
+    repo.insertMessage({
+      id: "m1",
+      sessionId: "s1",
+      turnId: "t1",
+      role: "user",
+      blocksJson: "[]",
+      createdAt: 10,
+    });
+    const list = repo.listMessagesBySession("s1");
+    expect(list.map((m) => m.id)).toEqual(["m1", "m2"]);
+  });
+
+  it("stores TokenUsage and stopReason when provided on assistant messages", () => {
+    repo.insertMessage({
+      id: "m1",
+      sessionId: "s1",
+      turnId: "t1",
+      role: "assistant",
+      blocksJson: "[]",
+      stopReason: "end_turn",
+      usage: { inputTokens: 10, outputTokens: 20, cacheReadTokens: 3 },
+      createdAt: 1,
+    });
+    const got = repo.listMessagesBySession("s1")[0]!;
+    expect(got.stopReason).toBe("end_turn");
+    expect(got.usage).toEqual({ inputTokens: 10, outputTokens: 20, cacheReadTokens: 3 });
+  });
+
+  it("runTx runs the inner writes atomically", () => {
+    expect(() =>
+      repo.runTx(() => {
+        repo.insertMessage({
+          id: "m1",
+          sessionId: "s1",
+          turnId: "t1",
+          role: "user",
+          blocksJson: "[]",
+          createdAt: 1,
+        });
+        // Second insert with duplicate PK — triggers rollback of whole tx.
+        repo.insertMessage({
+          id: "m1",
+          sessionId: "s1",
+          turnId: "t1",
+          role: "user",
+          blocksJson: "[]",
+          createdAt: 2,
+        });
+      }),
+    ).toThrow();
+    expect(repo.listMessagesBySession("s1")).toHaveLength(0);
+  });
+});
+```
+
+- [ ] **Step 2: Run the test and confirm it passes (no implementation change needed)**
+
+Run:
+```bash
+pnpm --filter @agent-team/backend test
+```
+Expected: PASS — all 5 messages cases green. If any fail, it means Task 16's messages stub has a bug — fix it there, not here.
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add packages/backend/src/db/messages.test.ts
+git commit -m "test(backend): add messages repository coverage"
+```
+
+### Task 18: Wire DB into the entry point + exit-criteria smoke
+
+**Files:**
+- Modify: `packages/backend/src/index.ts`
+
+- [ ] **Step 1: Update `packages/backend/src/index.ts` to open the DB at startup**
+
+```ts
+import { mkdirSync } from "node:fs";
+import { dirname } from "node:path";
+import { loadConfig } from "./config.js";
+import { openDb } from "./db/connection.js";
+import { Repository } from "./db/repository.js";
+import { createHttpServer } from "./http/server.js";
+import { createLogger } from "./logger.js";
+import { attachWsServer } from "./ws/server.js";
+
+async function main(): Promise<void> {
+  const config = loadConfig();
+  const logger = createLogger(config.logLevel);
+
+  mkdirSync(dirname(config.dbPath), { recursive: true });
+  const db = openDb(config.dbPath);
+  const repo = new Repository(db);
+  logger.info({ dbPath: config.dbPath }, "db opened");
+  // repo is threaded through in later chunks; reference to silence unused-var lint.
+  void repo;
+
+  const http = await createHttpServer({
+    port: config.port,
+    logger,
+  });
+  attachWsServer({ httpServer: http.server, path: "/ws", logger });
+
+  const shutdown = async (signal: string) => {
+    logger.info({ signal }, "shutting down");
+    await http.close();
+    db.close();
+    process.exit(0);
+  };
+  process.on("SIGINT", () => shutdown("SIGINT"));
+  process.on("SIGTERM", () => shutdown("SIGTERM"));
+}
+
+main().catch((err) => {
+  // eslint-disable-next-line no-console
+  console.error(err);
+  process.exit(1);
+});
+```
+
+- [ ] **Step 2: Build and verify**
+
+Run:
+```bash
+pnpm --filter @agent-team/backend build
+```
+Expected: exits 0; `dist/db/schema.sql` exists alongside `dist/db/connection.js`.
+
+- [ ] **Step 3: Smoke-run to confirm the DB file is created on startup**
+
+```bash
+cd "$(git rev-parse --show-toplevel)"
+rm -f data/atelier.db data/atelier.db-journal data/atelier.db-wal data/atelier.db-shm
+node packages/backend/dist/index.js &
+SERVER_PID=$!
+for i in 1 2 3 4 5; do
+  if [ -f data/atelier.db ] && curl -sf http://127.0.0.1:3001/health > /dev/null; then break; fi
+  sleep 1
+done
+test -f data/atelier.db && echo "db created OK" || { echo "db not created"; kill $SERVER_PID 2>/dev/null; exit 1; }
+kill $SERVER_PID 2>/dev/null || true
+```
+Expected: prints `db created OK`.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add packages/backend/src/index.ts
+git commit -m "feat(backend): open sqlite at startup, wire Repository"
+```
+
+### Chunk 3 exit criteria
+
+- `pnpm -r test` passes (adds sessions/turns/messages suites to the previous HTTP + config + WS suites).
+- `node packages/backend/dist/index.js` creates `data/atelier.db` with the three tables on first launch, reuses it on re-launch.
+- Every repository method called by the spec's pseudocode (§6.6, §6.7) exists and is tested: `getSession`, `allSessions`, `listSessions`, `updateProviderSessionId`, `clearProviderSessionId`, `insertTurn`, `getTurn`, `listTurnsBySession`, `latestTurn`, `turnsAfter`, `turnsByStatus`, `updateTurn`, `deleteTurns`, `insertMessage`, `listMessagesBySession`, `runTx`.
+- `data/` is in `.gitignore`; no `.db` files are ever committed.
+
+---
+
+(Chunks 4 through 9 will be appended after Chunk 3 is reviewed and approved.)
