@@ -7323,4 +7323,608 @@ git commit -m "feat(backend): assemble SessionService + TurnOrchestrator + Conne
 
 ---
 
-(Chunks 10 through 11 will be appended after Chunk 9 is reviewed and approved.)
+## Chunk 10: Rollback + Startup Recovery
+
+Goal: implement session rollback (spec §6.6) and termination recovery (spec §6.7). `RollbackService` validates the target turn, atomically truncates `turns` + `messages` via the repository's `runTx`, calls `GitSnapshot.resetTo(post_turn_commit)`, invalidates `provider_session_id`, and emits `session.rollback.complete`. `StartupRecovery` runs once in `index.ts` before the WS server accepts connections: it marks orphaned in-flight turns, resets workspaces to the oldest orphan's pre-turn commit, and clears `provider_session_id` so the next turn takes the replay path.
+
+### Task 36: `RollbackService`
+
+**Files:**
+- Create: `packages/backend/src/rollback/rollback-service.ts`
+- Create: `packages/backend/src/rollback/rollback-service.test.ts`
+
+- [ ] **Step 1: Write the failing test**
+
+Create `packages/backend/src/rollback/rollback-service.test.ts`:
+
+```ts
+import { mkdtempSync, rmSync, writeFileSync, existsSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { WSEvent } from "@agent-team/shared";
+import { EventBus } from "../bus/event-bus.js";
+import { MessagePersistSink } from "../bus/message-persist-sink.js";
+import { RingBufferSink } from "../bus/ring-buffer-sink.js";
+import type { EventSink } from "../bus/types.js";
+import { openDb, type Db } from "../db/connection.js";
+import { Repository } from "../db/repository.js";
+import { GitSnapshot } from "../workspace/git-snapshot.js";
+import { WorkspaceManager } from "../workspace/workspace-manager.js";
+import { SessionMutex } from "../session/mutex.js";
+import { RollbackService } from "./rollback-service.js";
+
+class RecorderSink implements EventSink {
+  events: WSEvent[] = [];
+  handle(ev: WSEvent) { this.events.push(ev); }
+}
+
+describe("RollbackService", () => {
+  let wsRoot: string;
+  let db: Db;
+  let repo: Repository;
+  let wm: WorkspaceManager;
+  let git: GitSnapshot;
+  let sink: RecorderSink;
+  let bus: EventBus;
+  let mutex: SessionMutex;
+  let rollback: RollbackService;
+
+  beforeEach(async () => {
+    wsRoot = mkdtempSync(join(tmpdir(), "atelier-rb-"));
+    db = openDb(":memory:");
+    repo = new Repository(db);
+    wm = new WorkspaceManager(wsRoot);
+    git = new GitSnapshot();
+    sink = new RecorderSink();
+    bus = new EventBus([sink, new MessagePersistSink(repo), new RingBufferSink({ capacity: 500 })]);
+    mutex = new SessionMutex();
+    rollback = new RollbackService({ repo, workspaceMgr: wm, git, bus, mutex });
+  });
+
+  afterEach(() => {
+    rmSync(wsRoot, { recursive: true, force: true });
+  });
+
+  const seedThreeTurns = async () => {
+    const sessionId = "s1";
+    const dir = wm.create(sessionId);
+    await git.initAndInitialCommit(dir);
+    repo.createSession({
+      id: sessionId, title: "T", agent: "claude", model: "m",
+      providerSessionId: "ses_1", systemPrompt: null, cwd: dir, createdAt: 0,
+    });
+
+    // turn 1: create a.txt
+    writeFileSync(join(dir, "a.txt"), "v1");
+    const pre1 = await git.commitPreTurn(dir, "t1");
+    const post1 = await git.commitPostTurn(dir, "t1");
+    repo.insertTurn({
+      id: "t1", sessionId, sequenceNum: 1, status: "completed",
+      preTurnCommit: pre1, postTurnCommit: post1, firstUserText: "u1", createdAt: 10, completedAt: 11,
+    });
+    repo.insertMessage({
+      id: "u1", sessionId, turnId: "t1", role: "user", blocksJson: "[]", createdAt: 10,
+    });
+    repo.insertMessage({
+      id: "a1", sessionId, turnId: "t1", role: "assistant", blocksJson: "[]", createdAt: 11,
+    });
+
+    // turn 2: modify a.txt
+    writeFileSync(join(dir, "a.txt"), "v2");
+    const pre2 = await git.commitPreTurn(dir, "t2");
+    const post2 = await git.commitPostTurn(dir, "t2");
+    repo.insertTurn({
+      id: "t2", sessionId, sequenceNum: 2, status: "completed",
+      preTurnCommit: pre2, postTurnCommit: post2, firstUserText: "u2", createdAt: 20, completedAt: 21,
+    });
+    repo.insertMessage({
+      id: "u2", sessionId, turnId: "t2", role: "user", blocksJson: "[]", createdAt: 20,
+    });
+
+    // turn 3: delete a.txt
+    rmSync(join(dir, "a.txt"));
+    const pre3 = await git.commitPreTurn(dir, "t3");
+    const post3 = await git.commitPostTurn(dir, "t3");
+    repo.insertTurn({
+      id: "t3", sessionId, sequenceNum: 3, status: "completed",
+      preTurnCommit: pre3, postTurnCommit: post3, firstUserText: "u3", createdAt: 30, completedAt: 31,
+    });
+    repo.insertMessage({
+      id: "u3", sessionId, turnId: "t3", role: "user", blocksJson: "[]", createdAt: 30,
+    });
+    return { sessionId, dir, post1, post2, post3 };
+  };
+
+  it("rolls back to end-of-turn-1: truncates DB, restores file, clears provider session, emits complete", async () => {
+    const { sessionId, dir } = await seedThreeTurns();
+    await rollback.rollbackTo(sessionId, "t1");
+
+    expect(repo.listTurnsBySession(sessionId).map((t) => t.id)).toEqual(["t1"]);
+    expect(repo.listMessagesBySession(sessionId).map((m) => m.id)).toEqual(["u1", "a1"]);
+    expect(readFileSync(join(dir, "a.txt"), "utf8")).toBe("v1");
+    expect(repo.getSession(sessionId)!.providerSessionId).toBeNull();
+
+    const done = sink.events.find((e) => e.type === "session.rollback.complete");
+    expect(done).toBeDefined();
+    expect((done as WSEvent & { payload: { removedTurnIds: string[] } }).payload.removedTurnIds)
+      .toEqual(["t2", "t3"]);
+  });
+
+  it("rejects rollback to an unknown turn id with rollback.target_not_found", async () => {
+    const { sessionId } = await seedThreeTurns();
+    await expect(rollback.rollbackTo(sessionId, "nope")).rejects.toThrow(/rollback\.target_not_found/);
+  });
+
+  it("rejects rollback to a turn that is not `completed`", async () => {
+    const { sessionId, dir } = await seedThreeTurns();
+    const pre4 = await git.commitPreTurn(dir, "t4");
+    repo.insertTurn({
+      id: "t4", sessionId, sequenceNum: 4, status: "in_progress",
+      preTurnCommit: pre4, firstUserText: "u4", createdAt: 40,
+    });
+    await expect(rollback.rollbackTo(sessionId, "t4")).rejects.toThrow(/rollback\.invalid_target/);
+  });
+
+  it("rejects rollback to the current HEAD turn as a no-op", async () => {
+    const { sessionId } = await seedThreeTurns();
+    await expect(rollback.rollbackTo(sessionId, "t3")).rejects.toThrow(/rollback\.invalid_target/);
+  });
+
+  it("rejects rollback while a turn is in flight with rollback.busy", async () => {
+    const { sessionId, dir } = await seedThreeTurns();
+    // Mark latest turn as still running.
+    repo.updateTurn("t3", { status: "in_progress" });
+    // Also insert a fresh in_progress row at seq 4 so latestTurn reports it.
+    const pre4 = await git.commitPreTurn(dir, "t4");
+    repo.insertTurn({
+      id: "t4", sessionId, sequenceNum: 4, status: "in_progress",
+      preTurnCommit: pre4, firstUserText: "u4", createdAt: 40,
+    });
+    await expect(rollback.rollbackTo(sessionId, "t1")).rejects.toThrow(/rollback\.busy/);
+  });
+});
+```
+
+- [ ] **Step 2: Run and confirm it fails**
+
+```bash
+pnpm --filter @agent-team/backend test
+```
+Expected: FAIL — `./rollback-service.js` does not exist.
+
+- [ ] **Step 3: Implement `packages/backend/src/rollback/rollback-service.ts`**
+
+```ts
+import type { Block, Message } from "@agent-team/shared";
+import type { EventBus } from "../bus/event-bus.js";
+import type { Repository } from "../db/repository.js";
+import type { SessionMutex } from "../session/mutex.js";
+import type { GitSnapshot } from "../workspace/git-snapshot.js";
+import type { WorkspaceManager } from "../workspace/workspace-manager.js";
+
+export type RollbackServiceDeps = {
+  repo: Repository;
+  workspaceMgr: WorkspaceManager;
+  git: GitSnapshot;
+  bus: EventBus;
+  mutex: SessionMutex;
+};
+
+export class RollbackService {
+  constructor(private readonly deps: RollbackServiceDeps) {}
+
+  async rollbackTo(sessionId: string, toTurnId: string): Promise<void> {
+    await this.deps.mutex.runExclusive(sessionId, () =>
+      this.rollbackLocked(sessionId, toTurnId),
+    );
+  }
+
+  private async rollbackLocked(sessionId: string, toTurnId: string): Promise<void> {
+    const target = this.deps.repo.getTurn(toTurnId);
+    if (!target || target.sessionId !== sessionId) {
+      throw new Error("rollback.target_not_found");
+    }
+    if (target.status !== "completed") {
+      throw new Error("rollback.invalid_target");
+    }
+    const head = this.deps.repo.latestTurn(sessionId);
+    if (!head) throw new Error("rollback.target_not_found");
+    if (head.id === toTurnId) throw new Error("rollback.invalid_target");
+    if (head.status === "in_progress") throw new Error("rollback.busy");
+    if (!target.postTurnCommit) throw new Error("rollback.invalid_target");
+
+    const session = this.deps.repo.getSession(sessionId);
+    if (!session) throw new Error("rollback.target_not_found");
+
+    const removed = this.deps.repo.turnsAfter(sessionId, target.sequenceNum);
+
+    // 1. DB truncate (atomic). Messages cascade via FK.
+    this.deps.repo.runTx(() => {
+      this.deps.repo.deleteTurns(removed.map((t) => t.id));
+      this.deps.repo.clearProviderSessionId(sessionId);
+    });
+
+    // 2. Git reset. If this fails, the session is flagged for startup
+    // reconcile (StartupRecovery will re-run git reset from
+    // session.cwd against latestTurn.postTurnCommit).
+    let filesRestored = 0;
+    try {
+      const res = await this.deps.git.resetTo(session.cwd, target.postTurnCommit);
+      filesRestored = res.filesRestored;
+    } catch (err) {
+      throw new Error("rollback.workspace_conflict");
+    }
+
+    // 3. Publish rollback.complete. Ordering is deliberate: fires ONLY
+    // after git reset succeeds. DB has already committed; if git had
+    // failed, startup recovery reconciles.
+    const messages = this.deps.repo.listMessagesBySession(sessionId).map<Message>((m) => ({
+      id: m.id,
+      role: m.role,
+      blocks: safeParseBlocks(m.blocksJson),
+      turnId: m.turnId,
+      createdAt: m.createdAt,
+    }));
+    this.deps.bus.publish(
+      {
+        type: "session.rollback.complete",
+        payload: {
+          sessionId,
+          removedTurnIds: removed.map((t) => t.id),
+          restoredToTurnId: target.id,
+          filesRestored,
+          messages,
+          lastSeq: this.deps.bus.peekSeq(sessionId),
+        },
+      },
+      { sessionId },
+    );
+  }
+}
+
+function safeParseBlocks(json: string): Block[] {
+  try {
+    const parsed = JSON.parse(json) as unknown;
+    return Array.isArray(parsed) ? (parsed as Block[]) : [];
+  } catch {
+    return [];
+  }
+}
+```
+
+- [ ] **Step 4: Run and confirm it passes**
+
+```bash
+pnpm --filter @agent-team/backend test
+```
+Expected: PASS — all 5 rollback cases green, all earlier suites green.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add packages/backend/src/rollback/rollback-service.ts \
+        packages/backend/src/rollback/rollback-service.test.ts
+git commit -m "feat(backend): add RollbackService with atomic DB tx + git reset"
+```
+
+### Task 37: `StartupRecovery`
+
+**Files:**
+- Create: `packages/backend/src/recovery/startup-recovery.ts`
+- Create: `packages/backend/src/recovery/startup-recovery.test.ts`
+
+- [ ] **Step 1: Write the failing test**
+
+Create `packages/backend/src/recovery/startup-recovery.test.ts`:
+
+```ts
+import { mkdtempSync, rmSync, writeFileSync, existsSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { openDb, type Db } from "../db/connection.js";
+import { Repository } from "../db/repository.js";
+import { GitSnapshot } from "../workspace/git-snapshot.js";
+import { WorkspaceManager } from "../workspace/workspace-manager.js";
+import { runStartupRecovery } from "./startup-recovery.js";
+
+describe("StartupRecovery", () => {
+  let wsRoot: string;
+  let db: Db;
+  let repo: Repository;
+  let wm: WorkspaceManager;
+  let git: GitSnapshot;
+
+  beforeEach(() => {
+    wsRoot = mkdtempSync(join(tmpdir(), "atelier-recov-"));
+    db = openDb(":memory:");
+    repo = new Repository(db);
+    wm = new WorkspaceManager(wsRoot);
+    git = new GitSnapshot();
+  });
+
+  afterEach(() => {
+    rmSync(wsRoot, { recursive: true, force: true });
+  });
+
+  it("no-op when no in-flight turns exist", async () => {
+    const dir = wm.create("s1");
+    await git.initAndInitialCommit(dir);
+    repo.createSession({
+      id: "s1", title: "T", agent: "claude", model: "m",
+      providerSessionId: "ses_1", systemPrompt: null, cwd: dir, createdAt: 0,
+    });
+    await expect(runStartupRecovery({ repo, workspaceMgr: wm, git })).resolves.toBeUndefined();
+    // Session untouched.
+    expect(repo.getSession("s1")!.providerSessionId).toBe("ses_1");
+  });
+
+  it("marks in_progress turns as orphaned and resets workspace + clears provider id", async () => {
+    const dir = wm.create("s1");
+    await git.initAndInitialCommit(dir);
+    writeFileSync(join(dir, "keep.txt"), "A");
+    const preSha = await git.commitPreTurn(dir, "t-in-flight");
+    // Simulate mid-turn file mutation that never post-committed.
+    writeFileSync(join(dir, "dirty.txt"), "dirty");
+
+    repo.createSession({
+      id: "s1", title: "T", agent: "claude", model: "m",
+      providerSessionId: "ses_1", systemPrompt: null, cwd: dir, createdAt: 0,
+    });
+    repo.insertTurn({
+      id: "t-in-flight", sessionId: "s1", sequenceNum: 1,
+      status: "in_progress", preTurnCommit: preSha, firstUserText: "u", createdAt: 0,
+    });
+
+    await runStartupRecovery({ repo, workspaceMgr: wm, git });
+
+    const turn = repo.getTurn("t-in-flight")!;
+    expect(turn.status).toBe("orphaned");
+    expect(turn.stopReason).toBe("error");
+    expect(existsSync(join(dir, "dirty.txt"))).toBe(false);
+    expect(repo.getSession("s1")!.providerSessionId).toBeNull();
+  });
+
+  it("lazily creates a workspace dir + initial commit for a session whose dir was deleted", async () => {
+    const dir = wm.create("s1");
+    await git.initAndInitialCommit(dir);
+    repo.createSession({
+      id: "s1", title: "T", agent: "claude", model: "m",
+      providerSessionId: null, systemPrompt: null, cwd: dir, createdAt: 0,
+    });
+    rmSync(dir, { recursive: true, force: true });
+
+    await runStartupRecovery({ repo, workspaceMgr: wm, git });
+    expect(existsSync(dir)).toBe(true);
+    expect(existsSync(join(dir, ".git"))).toBe(true);
+  });
+});
+```
+
+- [ ] **Step 2: Run and confirm it fails**
+
+```bash
+pnpm --filter @agent-team/backend test
+```
+Expected: FAIL — `./startup-recovery.js` does not exist.
+
+- [ ] **Step 3: Implement `packages/backend/src/recovery/startup-recovery.ts`**
+
+```ts
+import { existsSync } from "node:fs";
+import type { Repository } from "../db/repository.js";
+import type { GitSnapshot } from "../workspace/git-snapshot.js";
+import type { WorkspaceManager } from "../workspace/workspace-manager.js";
+
+export type StartupRecoveryDeps = {
+  repo: Repository;
+  workspaceMgr: WorkspaceManager;
+  git: GitSnapshot;
+};
+
+export async function runStartupRecovery(deps: StartupRecoveryDeps): Promise<void> {
+  const { repo, workspaceMgr, git } = deps;
+  for (const session of repo.allSessions()) {
+    // 1. Make sure the workspace dir + git repo exist.
+    const dir = workspaceMgr.ensure(session.id);
+    if (!existsSync(`${dir}/.git`)) {
+      await git.initAndInitialCommit(dir);
+    }
+
+    // 2. Mark any in-flight turns as orphaned.
+    const orphans = repo.turnsByStatus(session.id, "in_progress");
+    if (orphans.length === 0) continue;
+
+    const now = Date.now();
+    for (const t of orphans) {
+      repo.updateTurn(t.id, {
+        status: "orphaned",
+        stopReason: "error",
+        completedAt: now,
+      });
+    }
+
+    // 3. Reset workspace to the OLDEST orphan's pre-turn commit.
+    const oldest = orphans.reduce((min, t) =>
+      t.sequenceNum < min.sequenceNum ? t : min,
+    );
+    await git.resetTo(dir, oldest.preTurnCommit);
+
+    // 4. Invalidate provider session so the next turn takes the replay path.
+    repo.clearProviderSessionId(session.id);
+  }
+}
+```
+
+- [ ] **Step 4: Run and confirm it passes**
+
+```bash
+pnpm --filter @agent-team/backend test
+```
+Expected: PASS — all 3 recovery cases green.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add packages/backend/src/recovery/startup-recovery.ts \
+        packages/backend/src/recovery/startup-recovery.test.ts
+git commit -m "feat(backend): add StartupRecovery for orphaned turns"
+```
+
+### Task 38: Wire RollbackService + StartupRecovery into `index.ts`
+
+**Files:**
+- Modify: `packages/backend/src/index.ts`
+
+- [ ] **Step 1: Update `packages/backend/src/index.ts`**
+
+Add to `index.ts` (replace the `main` body):
+
+```ts
+  // ... (existing construction of bus + sinks + sessionService + turnOrch)
+
+  const rollback = new RollbackService({
+    repo,
+    workspaceMgr,
+    git,
+    bus,
+    mutex,
+  });
+
+  await runStartupRecovery({ repo, workspaceMgr, git });
+
+  // ... (existing createHttpServer + attachWsServer — pass `rollback` into
+  // the Connection factory now)
+  attachWsServer({
+    httpServer: http.server,
+    path: "/ws",
+    logger,
+    makeConnection: (send) =>
+      new Connection({
+        bus,
+        wsBroadcast,
+        ringBuffer,
+        sessionService,
+        turnOrch,
+        rollback,
+        send,
+      }),
+  });
+```
+
+Full updated file (paste in full, replacing Chunk 9's version):
+
+```ts
+import { mkdirSync } from "node:fs";
+import { dirname } from "node:path";
+import { EventBus } from "./bus/event-bus.js";
+import { MessagePersistSink } from "./bus/message-persist-sink.js";
+import { RingBufferSink } from "./bus/ring-buffer-sink.js";
+import { WsBroadcastSink } from "./bus/ws-broadcast-sink.js";
+import { loadConfig } from "./config.js";
+import { openDb } from "./db/connection.js";
+import { Repository } from "./db/repository.js";
+import { createHttpServer, type MetricsSource } from "./http/server.js";
+import { createLogger } from "./logger.js";
+import { runStartupRecovery } from "./recovery/startup-recovery.js";
+import { RollbackService } from "./rollback/rollback-service.js";
+import { SessionMutex } from "./session/mutex.js";
+import { SessionService } from "./session/session-service.js";
+import { TurnOrchestrator } from "./session/turn-orchestrator.js";
+import { ClaudeAgentRunner } from "./agent/claude/runner.js";
+import { ClaudeSdkSource } from "./agent/claude/sources/sdk-source.js";
+import { GitSnapshot } from "./workspace/git-snapshot.js";
+import { WorkspaceManager } from "./workspace/workspace-manager.js";
+import { Connection } from "./ws/connection.js";
+import { attachWsServer } from "./ws/server.js";
+
+async function main(): Promise<void> {
+  const config = loadConfig();
+  const logger = createLogger(config.logLevel);
+
+  mkdirSync(dirname(config.dbPath), { recursive: true });
+  mkdirSync(config.workspaceRoot, { recursive: true });
+
+  const db = openDb(config.dbPath);
+  const repo = new Repository(db);
+  const workspaceMgr = new WorkspaceManager(config.workspaceRoot);
+  const git = new GitSnapshot();
+
+  const wsBroadcast = new WsBroadcastSink({
+    onSenderError: (err, connectionId) =>
+      logger.warn({ connectionId, err }, "ws send failed"),
+  });
+  const ringBuffer = new RingBufferSink({ capacity: 500 });
+  const messagePersist = new MessagePersistSink(repo);
+  const bus = new EventBus([wsBroadcast, ringBuffer, messagePersist], {
+    onSinkError: (err, sinkIndex) => logger.error({ sinkIndex, err }, "event sink threw"),
+  });
+
+  const sessionService = new SessionService({ repo, workspaceMgr, git, bus });
+  const mutex = new SessionMutex();
+  const source = new ClaudeSdkSource({ anthropicApiKey: config.anthropicApiKey });
+  const runner = new ClaudeAgentRunner(source);
+  const turnOrch = new TurnOrchestrator({ repo, workspaceMgr, git, bus, runner, mutex });
+  const rollback = new RollbackService({ repo, workspaceMgr, git, bus, mutex });
+
+  await runStartupRecovery({ repo, workspaceMgr, git });
+
+  const metrics: MetricsSource = {
+    activeSessions: () => (sessionService.getActive() ? 1 : 0),
+    wsConnections: () => wsBroadcast.connectionCount(),
+    totalTurns: () => (db.prepare("SELECT COUNT(*) AS c FROM turns").get() as { c: number }).c,
+    orphanedTurns: () =>
+      (db.prepare("SELECT COUNT(*) AS c FROM turns WHERE status='orphaned'").get() as { c: number }).c,
+  };
+
+  const http = await createHttpServer({ port: config.port, logger, metrics });
+  attachWsServer({
+    httpServer: http.server,
+    path: "/ws",
+    logger,
+    makeConnection: (send) =>
+      new Connection({ bus, wsBroadcast, ringBuffer, sessionService, turnOrch, rollback, send }),
+  });
+
+  const shutdown = async (signal: string) => {
+    logger.info({ signal }, "shutting down");
+    await http.close();
+    db.close();
+    process.exit(0);
+  };
+  process.on("SIGINT", () => shutdown("SIGINT"));
+  process.on("SIGTERM", () => shutdown("SIGTERM"));
+}
+
+main().catch((err) => {
+  // eslint-disable-next-line no-console
+  console.error(err);
+  process.exit(1);
+});
+```
+
+- [ ] **Step 2: Build and sanity-smoke**
+
+```bash
+pnpm --filter @agent-team/backend build
+```
+Expected: exits 0. No smoke script added here — Chunks 9's integration test already covers end-to-end; Chunk 12 will add a Playwright E2E that exercises rollback + crash recovery.
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add packages/backend/src/index.ts
+git commit -m "feat(backend): wire RollbackService + StartupRecovery into startup"
+```
+
+### Chunk 10 exit criteria
+
+- `pnpm -r test` passes; adds 5 rollback cases + 3 recovery cases.
+- `RollbackService.rollbackTo(sessionId, turnId)` succeeds only for completed non-head target turns with no in-flight turn; DB tx commits before git reset; event `session.rollback.complete` fires after git reset succeeds.
+- `runStartupRecovery({ repo, workspaceMgr, git })` is idempotent and called exactly once before the WS server accepts connections. Orphans get `status="orphaned"`, workspaces reset to `preTurnCommit`, `provider_session_id` cleared.
+- `Connection` now receives a real `RollbackService` (no more "not yet available" stub).
+
+---
+
+(Chunks 11 through 12 will be appended after Chunk 10 is reviewed and approved.)
