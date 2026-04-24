@@ -162,12 +162,14 @@ coverage/
 *.log
 .env
 .env.local
-data/*.db
-data/*.db-journal
+data/*.db*
 workspaces/
 .DS_Store
 .vscode/
 ```
+
+The `data/*.db*` glob intentionally covers SQLite's WAL mode artifacts
+(`.db`, `.db-wal`, `.db-shm`, `.db-journal`) in one line.
 
 - [ ] **Step 4: Write `.nvmrc`**
 
@@ -1963,7 +1965,7 @@ export function openDb(path: string): Db {
 
 - [ ] **Step 6: Ensure `schema.sql` is copied into `dist/` on build**
 
-Edit `packages/backend/tsconfig.json` to add a `include` for the SQL file is not enough — TypeScript will not copy non-TS assets. Instead, change the build script in `packages/backend/package.json`:
+TypeScript does not copy non-TS assets, so add a post-build `cpSync` step to the `build` script in `packages/backend/package.json`:
 
 ```json
 "scripts": {
@@ -2486,49 +2488,9 @@ pnpm --filter @agent-team/backend test
 ```
 Expected: FAIL — `Repository` does not yet have `insertTurn / getTurn / …`. Also `insertMessage / listMessagesBySession` are referenced; they are implemented in Task 17 but we add their stubs in Task 16 Step 3 to keep the single-file repository linearly growable.
 
-- [ ] **Step 3: Extend `packages/backend/src/db/repository.ts` with turns + message stubs**
+- [ ] **Step 3: Replace `packages/backend/src/db/repository.ts` wholesale**
 
-Append to `repository.ts` (do NOT delete the existing sessions section):
-
-```ts
-// ==== Turns ====
-
-type TurnDbRow = {
-  id: string;
-  session_id: string;
-  sequence_num: number;
-  status: string;
-  stop_reason: string | null;
-  usage_json: string | null;
-  pre_turn_commit: string;
-  post_turn_commit: string | null;
-  first_user_text: string;
-  created_at: number;
-  completed_at: number | null;
-};
-
-function rowToTurn(r: TurnDbRow): TurnRow {
-  return {
-    id: r.id,
-    sessionId: r.session_id,
-    sequenceNum: r.sequence_num,
-    status: r.status as TurnRow["status"],
-    stopReason: (r.stop_reason as TurnRow["stopReason"]) ?? null,
-    usage: r.usage_json ? (JSON.parse(r.usage_json) as TurnRow["usage"]) : null,
-    preTurnCommit: r.pre_turn_commit,
-    postTurnCommit: r.post_turn_commit,
-    firstUserText: r.first_user_text,
-    createdAt: r.created_at,
-    completedAt: r.completed_at,
-  };
-}
-
-declare module "./repository.js" {}
-
-// Append these methods INSIDE the Repository class by opening it again:
-```
-
-Because TypeScript does not support partial class bodies, do not use the `declare module` trick above — the correct approach is to put everything into a single class body. Replace `packages/backend/src/db/repository.ts` **entirely** with the content below, which combines sessions (Task 15) + turns (this task) + the stubs required for the Task 16 test to link (message CRUD gets real in Task 17):
+Because TypeScript does not support partial class bodies, we replace the file in full. The new version combines sessions (from Task 15) + turns (this task) + message CRUD (the stub here is already the final implementation; Task 17 only adds dedicated messages tests):
 
 ```ts
 import type { SessionSummary } from "@agent-team/shared";
@@ -2828,6 +2790,10 @@ export class Repository {
       .run(input.createdAt, input.sessionId);
   }
 
+  // MessageRow deliberately keeps `blocksJson` as a raw string. Consumers
+  // (e.g. SessionService building `session.ready` in Chunk 6) are responsible
+  // for parsing to `Block[]`. Keeping the repo JSON-agnostic avoids double
+  // parse/stringify when a caller only needs counts or metadata.
   listMessagesBySession(sessionId: string): MessageRow[] {
     const rs = this.db
       .prepare(
@@ -2839,6 +2805,9 @@ export class Repository {
 
   // ==== Transactions ====
 
+  // SYNCHRONOUS ONLY. Do not `await` inside `fn`. Any async op (git, network,
+  // subprocess) must run OUTSIDE the transaction — see spec §6.6 rollback,
+  // which commits the DB tx first and runs `git resetTo` afterwards.
   runTx<T>(fn: () => T): T {
     return this.db.transaction(fn)();
   }
