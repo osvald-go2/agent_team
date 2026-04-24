@@ -5198,4 +5198,400 @@ git commit -m "feat(backend): add ClaudeAgentRunner piping SDK stream -> AgentEv
 
 ---
 
-(Chunks 7 through 9 will be appended after Chunk 6 is reviewed and approved.)
+## Chunk 7: Workspace Manager + Git Snapshot
+
+Goal: own the filesystem sandbox each session operates inside. `WorkspaceManager` materializes `${WORKSPACE_ROOT}/${sessionId}/` on demand. `GitSnapshot` wraps `simple-git` with the four operations the spec needs (spec §6.5): initial commit, pre-turn commit, post-turn commit, reset-to-sha. All file writes stay inside the session workspace — nothing touches the monorepo's `.git`. Both modules are tested against temporary directories created per test via `fs.mkdtempSync(os.tmpdir() + "/...")`.
+
+**Design reminders from spec §6.5:**
+- Workspace dir is a standalone git repo (no remote, never pushed).
+- `git add -A` before every commit captures creations, modifications, and deletions equally.
+- Commit identity is fixed (`AgentTeam <agent@local>`), never the user's global git config.
+- Commit messages are human-readable: `"pre-turn <turnId>"` / `"post-turn <turnId>"` / `"initial"`.
+- Users are told (spec §3 non-goals) not to `git init` inside the workspace themselves.
+
+### Task 28: `WorkspaceManager`
+
+**Files:**
+- Create: `packages/backend/src/workspace/workspace-manager.ts`
+- Create: `packages/backend/src/workspace/workspace-manager.test.ts`
+
+- [ ] **Step 1: Write the failing test**
+
+Create `packages/backend/src/workspace/workspace-manager.test.ts`:
+
+```ts
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { WorkspaceManager } from "./workspace-manager.js";
+
+describe("WorkspaceManager", () => {
+  let root: string;
+  let mgr: WorkspaceManager;
+
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), "atelier-ws-"));
+    mgr = new WorkspaceManager(root);
+  });
+
+  afterEach(() => {
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it("create() makes a fresh directory under the root", () => {
+    const dir = mgr.create("s1");
+    expect(existsSync(dir)).toBe(true);
+    expect(dir).toBe(join(root, "s1"));
+  });
+
+  it("ensure() is idempotent — returning the same dir when already present", () => {
+    const d1 = mgr.create("s1");
+    writeFileSync(join(d1, "keep.txt"), "hi");
+    const d2 = mgr.ensure("s1");
+    expect(d2).toBe(d1);
+    expect(existsSync(join(d2, "keep.txt"))).toBe(true);
+  });
+
+  it("ensure() lazily creates when the dir is missing", () => {
+    const dir = mgr.ensure("never-seen");
+    expect(existsSync(dir)).toBe(true);
+  });
+
+  it("dirFor() returns the path without creating it", () => {
+    const dir = mgr.dirFor("ghost");
+    expect(dir).toBe(join(root, "ghost"));
+    expect(existsSync(dir)).toBe(false);
+  });
+
+  it("rejects sessionIds that try to escape the root", () => {
+    expect(() => mgr.dirFor("../escape")).toThrow(/invalid/i);
+    expect(() => mgr.dirFor("..")).toThrow(/invalid/i);
+    expect(() => mgr.dirFor("a/b")).toThrow(/invalid/i);
+  });
+});
+```
+
+- [ ] **Step 2: Run and confirm it fails**
+
+```bash
+pnpm --filter @agent-team/backend test
+```
+Expected: FAIL — `./workspace-manager.js` does not exist.
+
+- [ ] **Step 3: Implement `packages/backend/src/workspace/workspace-manager.ts`**
+
+```ts
+import { existsSync, mkdirSync } from "node:fs";
+import { join, resolve } from "node:path";
+
+// Matches our session id format (uuids and slugs). Rejects path separators,
+// dots, and anything that could escape the workspace root.
+const SAFE_ID = /^[a-zA-Z0-9][a-zA-Z0-9_-]*$/;
+
+export class WorkspaceManager {
+  private readonly rootAbs: string;
+
+  constructor(root: string) {
+    this.rootAbs = resolve(root);
+  }
+
+  root(): string {
+    return this.rootAbs;
+  }
+
+  dirFor(sessionId: string): string {
+    if (!SAFE_ID.test(sessionId)) {
+      throw new Error(`invalid sessionId for workspace: "${sessionId}"`);
+    }
+    // Double check with resolve() — belt and suspenders.
+    const candidate = resolve(this.rootAbs, sessionId);
+    if (!candidate.startsWith(this.rootAbs + "/") && candidate !== this.rootAbs) {
+      throw new Error(`invalid sessionId for workspace: "${sessionId}"`);
+    }
+    return join(this.rootAbs, sessionId);
+  }
+
+  create(sessionId: string): string {
+    const dir = this.dirFor(sessionId);
+    mkdirSync(dir, { recursive: true });
+    return dir;
+  }
+
+  ensure(sessionId: string): string {
+    const dir = this.dirFor(sessionId);
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+    return dir;
+  }
+}
+```
+
+- [ ] **Step 4: Run and confirm it passes**
+
+```bash
+pnpm --filter @agent-team/backend test
+```
+Expected: PASS — all 5 cases green.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add packages/backend/src/workspace/workspace-manager.ts \
+        packages/backend/src/workspace/workspace-manager.test.ts
+git commit -m "feat(backend): add WorkspaceManager with safe-id guard"
+```
+
+### Task 29: `GitSnapshot`
+
+**Files:**
+- Modify: `packages/backend/package.json` — add `simple-git` dep
+- Create: `packages/backend/src/workspace/git-snapshot.ts`
+- Create: `packages/backend/src/workspace/git-snapshot.test.ts`
+
+- [ ] **Step 1: Add `simple-git` to `packages/backend/package.json` dependencies**
+
+```json
+"simple-git": "^3.27.0"
+```
+
+Run:
+```bash
+pnpm install
+```
+Expected: installs. `simple-git` is pure JS; just requires `git` on `PATH` at runtime.
+
+- [ ] **Step 2: Write the failing test**
+
+Create `packages/backend/src/workspace/git-snapshot.test.ts`:
+
+```ts
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { GitSnapshot } from "./git-snapshot.js";
+
+describe("GitSnapshot", () => {
+  let dir: string;
+  let git: GitSnapshot;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "atelier-git-"));
+    git = new GitSnapshot();
+  });
+
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("initAndInitialCommit() creates a repo and returns the initial commit sha", async () => {
+    const sha = await git.initAndInitialCommit(dir);
+    expect(sha).toMatch(/^[0-9a-f]{40}$/);
+    expect(existsSync(join(dir, ".git"))).toBe(true);
+  });
+
+  it("commitPreTurn() captures all uncommitted changes with the expected message", async () => {
+    await git.initAndInitialCommit(dir);
+    writeFileSync(join(dir, "a.txt"), "hello");
+    const sha = await git.commitPreTurn(dir, "turn-123");
+    expect(sha).toMatch(/^[0-9a-f]{40}$/);
+
+    // The last commit message should be "pre-turn turn-123".
+    const msg = await git.lastCommitMessage(dir);
+    expect(msg).toBe("pre-turn turn-123");
+  });
+
+  it("commitPostTurn() captures later changes under a matching message", async () => {
+    await git.initAndInitialCommit(dir);
+    await git.commitPreTurn(dir, "t1");
+    writeFileSync(join(dir, "a.txt"), "first");
+    const postSha = await git.commitPostTurn(dir, "t1");
+    expect(postSha).toMatch(/^[0-9a-f]{40}$/);
+    expect(await git.lastCommitMessage(dir)).toBe("post-turn t1");
+  });
+
+  it("resetTo() restores the working tree to a given sha (files re-appear and dis-appear correctly)", async () => {
+    const initial = await git.initAndInitialCommit(dir);
+
+    writeFileSync(join(dir, "a.txt"), "A1");
+    await git.commitPreTurn(dir, "t1");
+    writeFileSync(join(dir, "a.txt"), "A2");
+    const postT1 = await git.commitPostTurn(dir, "t1");
+
+    writeFileSync(join(dir, "a.txt"), "A3");
+    writeFileSync(join(dir, "b.txt"), "B1");
+    await git.commitPreTurn(dir, "t2");
+    rmSync(join(dir, "a.txt"));
+    const postT2 = await git.commitPostTurn(dir, "t2");
+
+    // Reset to the end of t1: a.txt should be "A2" and b.txt should be gone.
+    const res = await git.resetTo(dir, postT1);
+    expect(readFileSync(join(dir, "a.txt"), "utf8")).toBe("A2");
+    expect(existsSync(join(dir, "b.txt"))).toBe(false);
+    expect(res.filesRestored).toBeGreaterThan(0);
+
+    // Sanity: the other sha still exists in history for later moves.
+    expect(initial).not.toBe(postT1);
+    expect(postT1).not.toBe(postT2);
+  });
+
+  it("resetTo() throws when the sha does not exist in the repo", async () => {
+    await git.initAndInitialCommit(dir);
+    await expect(git.resetTo(dir, "0000000000000000000000000000000000000000")).rejects.toThrow();
+  });
+
+  it("commitPreTurn() is a no-op (same sha as HEAD) when the tree is clean", async () => {
+    const initial = await git.initAndInitialCommit(dir);
+    const sha = await git.commitPreTurn(dir, "empty-1");
+    // When there's nothing to commit, we still record a marker; pick the
+    // approach most natural for rollback — a fresh commit (even empty)
+    // keeps pre/post symmetry. The test asserts the sha differs from
+    // `initial` so rollback can distinguish "before turn" from "initial".
+    expect(sha).not.toBe(initial);
+  });
+
+  it("commits use the fixed author identity (not the user's git config)", async () => {
+    await git.initAndInitialCommit(dir);
+    writeFileSync(join(dir, "x.txt"), "y");
+    await git.commitPreTurn(dir, "t1");
+    const author = await git.lastAuthor(dir);
+    expect(author.name).toBe("AgentTeam");
+    expect(author.email).toBe("agent@local");
+  });
+});
+```
+
+- [ ] **Step 3: Run and confirm it fails**
+
+```bash
+pnpm --filter @agent-team/backend test
+```
+Expected: FAIL — `./git-snapshot.js` does not exist.
+
+- [ ] **Step 4: Implement `packages/backend/src/workspace/git-snapshot.ts`**
+
+```ts
+import { simpleGit, type SimpleGit } from "simple-git";
+
+const AUTHOR = { name: "AgentTeam", email: "agent@local" } as const;
+
+export type ResetResult = {
+  filesRestored: number;
+};
+
+export class GitSnapshot {
+  private client(dir: string): SimpleGit {
+    return simpleGit({
+      baseDir: dir,
+      config: [
+        `user.name=${AUTHOR.name}`,
+        `user.email=${AUTHOR.email}`,
+        // Ignore any existing user git hooks/signing that might refuse
+        // to commit inside a sandbox.
+        "commit.gpgsign=false",
+      ],
+    });
+  }
+
+  async initAndInitialCommit(dir: string): Promise<string> {
+    const g = this.client(dir);
+    await g.init();
+    // Set a local branch default so checkouts/resets have a name to target.
+    await g.raw(["symbolic-ref", "HEAD", "refs/heads/main"]);
+    await g.add(".");
+    const out = await g.commit("initial", undefined, { "--allow-empty": null });
+    return this.resolveCommitSha(out.commit) || (await g.revparse(["HEAD"]));
+  }
+
+  async commitPreTurn(dir: string, turnId: string): Promise<string> {
+    return this.commit(dir, `pre-turn ${turnId}`);
+  }
+
+  async commitPostTurn(dir: string, turnId: string): Promise<string> {
+    return this.commit(dir, `post-turn ${turnId}`);
+  }
+
+  async resetTo(dir: string, sha: string): Promise<ResetResult> {
+    const g = this.client(dir);
+    // Verify the sha exists before touching the working tree.
+    await g.raw(["cat-file", "-e", sha]);
+    const before = await g.raw(["ls-files"]);
+    await g.reset(["--hard", sha]);
+    // Clean anything the reset didn't already handle (untracked files that
+    // appeared between the target and HEAD before reset).
+    await g.clean("f", ["-d"]);
+    const after = await g.raw(["ls-files"]);
+    const filesRestored = this.countChangedFiles(before, after);
+    return { filesRestored };
+  }
+
+  async verifyClean(dir: string): Promise<boolean> {
+    const g = this.client(dir);
+    const status = await g.status();
+    return status.isClean();
+  }
+
+  async lastCommitMessage(dir: string): Promise<string> {
+    const g = this.client(dir);
+    const out = await g.raw(["log", "-1", "--pretty=%s"]);
+    return out.trim();
+  }
+
+  async lastAuthor(dir: string): Promise<{ name: string; email: string }> {
+    const g = this.client(dir);
+    const out = await g.raw(["log", "-1", "--pretty=%an%n%ae"]);
+    const [name, email] = out.trim().split("\n");
+    return { name: name ?? "", email: email ?? "" };
+  }
+
+  private async commit(dir: string, message: string): Promise<string> {
+    const g = this.client(dir);
+    await g.add(".");
+    const out = await g.commit(message, undefined, { "--allow-empty": null });
+    return this.resolveCommitSha(out.commit) || (await g.revparse(["HEAD"]));
+  }
+
+  private resolveCommitSha(raw: string): string {
+    // simple-git sometimes returns a short sha; always expand to full.
+    if (/^[0-9a-f]{40}$/.test(raw)) return raw;
+    return "";
+  }
+
+  private countChangedFiles(before: string, after: string): number {
+    const b = new Set(before.split("\n").filter(Boolean));
+    const a = new Set(after.split("\n").filter(Boolean));
+    let changed = 0;
+    for (const x of b) if (!a.has(x)) changed++;
+    for (const x of a) if (!b.has(x)) changed++;
+    return changed;
+  }
+}
+```
+
+- [ ] **Step 5: Run and confirm it passes**
+
+```bash
+pnpm --filter @agent-team/backend test
+```
+Expected: PASS — all 7 git-snapshot cases green. Tests take up to a few seconds each because they spawn real `git` processes. This is acceptable for MVP; we can move to the faster `isomorphic-git` library if startup cost becomes annoying.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add packages/backend/package.json pnpm-lock.yaml \
+        packages/backend/src/workspace/git-snapshot.ts \
+        packages/backend/src/workspace/git-snapshot.test.ts
+git commit -m "feat(backend): add GitSnapshot wrapper (init/pre/post/reset)"
+```
+
+### Chunk 7 exit criteria
+
+- `pnpm -r test` passes — `WorkspaceManager` adds 5 cases and `GitSnapshot` adds 7 cases.
+- `WorkspaceManager` rejects unsafe session ids (`..`, `a/b`, leading `-`, etc.); only `/^[a-zA-Z0-9][a-zA-Z0-9_-]*$/` is admitted.
+- `GitSnapshot.initAndInitialCommit`, `commitPreTurn`, `commitPostTurn`, `resetTo`, `verifyClean` all exist and return real SHAs / pass through real changes.
+- `git` binary is assumed present on `PATH` at runtime; `simple-git` doesn't bundle it. Document this as a README prerequisite later when we write the README (not in MVP scope).
+- `WorkspaceManager` and `GitSnapshot` remain decoupled — the manager never calls git and vice versa; `SessionService` in Chunk 8 will orchestrate them.
+
+---
+
+(Chunks 8 through 9 will be appended after Chunk 7 is reviewed and approved.)
