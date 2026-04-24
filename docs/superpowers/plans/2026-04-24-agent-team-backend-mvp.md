@@ -4025,12 +4025,16 @@ export class MessagePersistSink implements EventSink {
       for (const id of ids) {
         const m = this.active.get(id);
         if (!m) continue;
+        // Compact any sparse holes (e.g. when an upstream emits blockIdx=0
+        // then blockIdx=2 with nothing at idx 1). Keeps persisted Block[]
+        // a dense tuple and avoids `null` entries in blocks_json.
+        const dense = m.blocks.filter((b): b is Block => b !== undefined);
         this.repo.insertMessage({
           id: m.messageId,
           sessionId: m.sessionId,
           turnId: m.turnId,
           role: "assistant",
-          blocksJson: JSON.stringify(m.blocks),
+          blocksJson: JSON.stringify(dense),
           stopReason,
           usage: usage ?? null,
           createdAt: m.createdAt,
@@ -4176,7 +4180,7 @@ git commit -m "feat(backend): wire EventBus + 3 sinks into startup; live /metric
 - `pnpm -r test` passes; `MessagePersistSink` adds 6 cases.
 - Running `node packages/backend/dist/index.js` still boots, serves `/health`, `/metrics` now reports `ws_connections` and `total_turns` from live sources (both 0 until Chunk 6 brings real traffic).
 - All three sinks are constructed in `index.ts` in the order `[wsBroadcast, ringBuffer, messagePersist]`. `bus` is held as a binding but not yet consumed (consumer lands with `SessionService` / `TurnOrchestrator` in Chunk 6).
-- `subagent.*` events are explicitly no-ops in `MessagePersistSink` for MVP (documented by a TODO-style comment referencing that Chunk 7 or beyond adds nested message persistence).
+- `subagent.*` events are explicit no-op fall-throughs in `MessagePersistSink` for MVP (documented inline; full nested `Block { type: "subagent" }` persistence is a post-MVP feature per spec §12 "Future work").
 - WebSocket protocol dispatch (C2S routing) is still ping/pong only — full C2S handling lands in Chunk 6.
 
 ---
