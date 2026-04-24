@@ -4472,6 +4472,7 @@ import { translate, type TranslatorState } from "./translator.js";
 const initState = (): TranslatorState => ({
   currentMessageId: null,
   currentBlockIdx: 0,
+  messageOpen: false,
   providerSessionId: null,
 });
 
@@ -4493,7 +4494,7 @@ describe("translate", () => {
     expect(state.providerSessionId).toBe("ses_abc");
   });
 
-  it("maps an assistant message with a streamed text block to message_start + text_delta + message_end", () => {
+  it("maps an assistant message with a text block to message_start + text_delta (no message_end yet)", () => {
     const state = initState();
     const out = drain(state, {
       type: "assistant",
@@ -4506,8 +4507,48 @@ describe("translate", () => {
     expect(out).toEqual<AgentEvent[]>([
       { kind: "message_start", messageId: "msg_1" },
       { kind: "text_delta", messageId: "msg_1", blockIdx: 0, text: "Hello" },
-      { kind: "message_end", messageId: "msg_1" },
     ]);
+  });
+
+  it("does NOT re-emit message_start for subsequent assistant items sharing the same id", () => {
+    const state = initState();
+    drain(state, {
+      type: "assistant",
+      message: { id: "msg_1", role: "assistant", content: [{ type: "text", text: "He" }] },
+    });
+    const out = drain(state, {
+      type: "assistant",
+      message: { id: "msg_1", role: "assistant", content: [{ type: "text", text: "llo" }] },
+    });
+    expect(out.some((e) => e.kind === "message_start")).toBe(false);
+    expect(out.some((e) => e.kind === "message_end")).toBe(false);
+  });
+
+  it("closes the open message with message_end when a NEW message id arrives", () => {
+    const state = initState();
+    drain(state, {
+      type: "assistant",
+      message: { id: "msg_1", role: "assistant", content: [{ type: "text", text: "A" }] },
+    });
+    const out = drain(state, {
+      type: "assistant",
+      message: { id: "msg_2", role: "assistant", content: [{ type: "text", text: "B" }] },
+    });
+    expect(out.slice(0, 2)).toEqual([
+      { kind: "message_end", messageId: "msg_1" },
+      { kind: "message_start", messageId: "msg_2" },
+    ]);
+  });
+
+  it("closes the open message with message_end on the result boundary", () => {
+    const state = initState();
+    drain(state, {
+      type: "assistant",
+      message: { id: "msg_1", role: "assistant", content: [{ type: "text", text: "A" }] },
+    });
+    const out = drain(state, { type: "result", subtype: "success", is_error: false });
+    expect(out[0]).toEqual({ kind: "message_end", messageId: "msg_1" });
+    expect(out.at(-1)!.kind).toBe("turn_end");
   });
 
   it("maps a thinking block to thinking_delta", () => {
@@ -4647,11 +4688,14 @@ import type { TodoItem } from "@agent-team/shared";
 import type { AgentEvent } from "../runner.js";
 
 // Mutable state carried across multiple calls to `translate` for a single
-// turn's stream. Keyed to "what's the current message id + block index?"
-// and "what provider session should turn_end report?"
+// turn's stream. Tracks: the in-flight assistant message (if any), the
+// next block index to assign within that message, whether message_end
+// still needs to fire for it, and the provider session id captured from
+// the SDK's system init frame.
 export type TranslatorState = {
   currentMessageId: string | null;
   currentBlockIdx: number;
+  messageOpen: boolean;                // true iff message_start emitted but message_end not yet
   providerSessionId: string | null;
 };
 
@@ -4715,8 +4759,16 @@ function* translateAssistant(
   }
   const isNew = state.currentMessageId !== id;
   if (isNew) {
+    // Close any previously-open message before starting a new one. This
+    // keeps `message_end` emitted exactly once per message even when the
+    // SDK delivers multiple assistant frames with the same id (streaming)
+    // or boundary-hops directly between ids.
+    if (state.messageOpen && state.currentMessageId) {
+      yield { kind: "message_end", messageId: state.currentMessageId };
+    }
     state.currentMessageId = id;
     state.currentBlockIdx = 0;
+    state.messageOpen = true;
     yield { kind: "message_start", messageId: id };
   }
 
@@ -4727,12 +4779,15 @@ function* translateAssistant(
     state.currentBlockIdx++;
   }
 
-  // One SDK assistant message in streaming mode maps to one assistant message
-  // in our domain. We emit message_end as soon as the message is consumed.
-  // For streaming deltas split across multiple SDK messages (same id),
-  // `isNew` is false and we keep accumulating blocks without re-emitting
-  // message_start. message_end still fires per SDK message arrival.
-  yield { kind: "message_end", messageId: id };
+  // NOTE: do NOT emit message_end from here. The SDK can deliver the same
+  // assistant message as multiple frames during streaming; emitting per
+  // frame would produce duplicate terminals. message_end fires exactly
+  // once per message — either when a new message_start preempts it (above)
+  // or when translateResult runs at turn boundary.
+  //
+  // Nested Task spawning (subagent inside a subagent) is not handled at
+  // this layer — TurnOrchestrator wraps nested events via
+  // subagent_event.inner in Chunk 8.
 }
 
 function* translateAssistantBlock(
@@ -4858,6 +4913,13 @@ function* translateResult(
   state: TranslatorState,
   item: Any,
 ): Iterable<AgentEvent> {
+  // Close any still-open assistant message before firing turn_end. This
+  // guarantees every message_start has a matching message_end.
+  if (state.messageOpen && state.currentMessageId) {
+    yield { kind: "message_end", messageId: state.currentMessageId };
+    state.messageOpen = false;
+  }
+
   const subtype = typeof item?.subtype === "string" ? item.subtype : "success";
   const stopReason =
     subtype === "success" ? "end_turn" :
@@ -4996,14 +5058,17 @@ describe("ClaudeAgentRunner", () => {
     });
   });
 
-  it("returns a providerSessionId from resume() by opening a short-lived stream", async () => {
-    const source = new FakeSource([
-      { type: "system", subtype: "init", session_id: "ses_restored", model: "m", cwd: "/w", tools: [] },
-      { type: "result", subtype: "success", is_error: false },
-    ]);
+  it("resume() echoes the known providerSessionId without opening a stream", async () => {
+    const source = new FakeSource([]);   // no SDK calls expected
     const runner = new ClaudeAgentRunner(source);
     const { providerSessionId } = await runner.resume("s", "ses_restored");
     expect(providerSessionId).toBe("ses_restored");
+  });
+
+  it("resume() throws when providerSessionId is null (consumer must use startTurn with replayHistory)", async () => {
+    const source = new FakeSource([]);
+    const runner = new ClaudeAgentRunner(source);
+    await expect(runner.resume("s", null)).rejects.toThrow(/replayHistory/);
   });
 
   it("propagates cancellation via AbortController", async () => {
@@ -5067,6 +5132,7 @@ export class ClaudeAgentRunner implements AgentRunner {
     const state: TranslatorState = {
       currentMessageId: null,
       currentBlockIdx: 0,
+      messageOpen: false,
       providerSessionId: input.providerSessionId,
     };
     try {
@@ -5089,9 +5155,14 @@ export class ClaudeAgentRunner implements AgentRunner {
     _sessionId: string,
     providerSessionId: string | null,
   ): Promise<ResumeResult> {
-    // If we already know the providerSessionId, trust it. Otherwise
-    // Chunk 8's SessionService will call startTurn which runs the
-    // SDK's own resume mechanism via StartTurnInput.providerSessionId.
+    // Contract: a known providerSessionId is trusted and returned as-is.
+    // The real "resume Claude's context" work happens inside the SDK when
+    // startTurn passes `resume: providerSessionId` on the next turn.
+    //
+    // Post-rollback and first-turn sessions have no providerSessionId. By
+    // spec §6.6, SessionService clears it on rollback and TurnOrchestrator
+    // is responsible for passing `replayHistory` to startTurn instead of
+    // calling resume(). We refuse null here so a misuse fails loudly.
     if (providerSessionId) {
       return { providerSessionId };
     }
