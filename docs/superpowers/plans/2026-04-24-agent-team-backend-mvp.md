@@ -5440,13 +5440,11 @@ describe("GitSnapshot", () => {
     await expect(git.resetTo(dir, "0000000000000000000000000000000000000000")).rejects.toThrow();
   });
 
-  it("commitPreTurn() is a no-op (same sha as HEAD) when the tree is clean", async () => {
+  it("commitPreTurn() creates an empty commit when the tree is clean (preserves pre/post symmetry)", async () => {
     const initial = await git.initAndInitialCommit(dir);
     const sha = await git.commitPreTurn(dir, "empty-1");
-    // When there's nothing to commit, we still record a marker; pick the
-    // approach most natural for rollback — a fresh commit (even empty)
-    // keeps pre/post symmetry. The test asserts the sha differs from
-    // `initial` so rollback can distinguish "before turn" from "initial".
+    // With --allow-empty, even a clean tree produces a fresh commit so that
+    // rollback can always distinguish "before turn" from "initial".
     expect(sha).not.toBe(initial);
   });
 
@@ -5498,9 +5496,9 @@ export class GitSnapshot {
     await g.init();
     // Set a local branch default so checkouts/resets have a name to target.
     await g.raw(["symbolic-ref", "HEAD", "refs/heads/main"]);
-    await g.add(".");
-    const out = await g.commit("initial", undefined, { "--allow-empty": null });
-    return this.resolveCommitSha(out.commit) || (await g.revparse(["HEAD"]));
+    await g.raw(["add", "-A"]);
+    await g.commit("initial", undefined, { "--allow-empty": null });
+    return g.revparse(["HEAD"]);
   }
 
   async commitPreTurn(dir: string, turnId: string): Promise<string> {
@@ -5546,18 +5544,18 @@ export class GitSnapshot {
 
   private async commit(dir: string, message: string): Promise<string> {
     const g = this.client(dir);
-    await g.add(".");
-    const out = await g.commit(message, undefined, { "--allow-empty": null });
-    return this.resolveCommitSha(out.commit) || (await g.revparse(["HEAD"]));
-  }
-
-  private resolveCommitSha(raw: string): string {
-    // simple-git sometimes returns a short sha; always expand to full.
-    if (/^[0-9a-f]{40}$/.test(raw)) return raw;
-    return "";
+    // `git add -A` captures creations, modifications, AND deletions from
+    // any tool (Write, Edit, Bash rm, etc.) — mandated by spec §6.5.
+    await g.raw(["add", "-A"]);
+    await g.commit(message, undefined, { "--allow-empty": null });
+    return g.revparse(["HEAD"]);
   }
 
   private countChangedFiles(before: string, after: string): number {
+    // Counts tracked-file adds/removes between two `ls-files` snapshots.
+    // Untracked files cleaned by `clean -fd` are NOT counted — the
+    // resulting number is a user-facing hint in session.rollback.complete,
+    // not an exact file-count.
     const b = new Set(before.split("\n").filter(Boolean));
     const a = new Set(after.split("\n").filter(Boolean));
     let changed = 0;
