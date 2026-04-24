@@ -2,6 +2,15 @@
 // All components read from window.AppData.
 
 window.AppData = (() => {
+  const providers = [
+    { value: "Claude", label: "Claude" },
+    { value: "Codex",  label: "Codex (OpenAI)" },
+  ];
+  const modelsByProvider = {
+    Claude: ["claude-opus-4-7", "claude-sonnet-4-6", "claude-haiku-4-5"],
+    Codex:  ["gpt-5-4", "gpt-5", "gpt-4o"],
+  };
+
   const agents = [
     {
       id: "prd-analyst",
@@ -9,7 +18,8 @@ window.AppData = (() => {
       icon: "scan",
       role: "Requirements",
       desc: "Parses PRD docs into structured requirements, user stories, and acceptance criteria.",
-      model: "claude-sonnet-4.5",
+      model: "claude-sonnet-4-6",
+      provider: "Claude",
       skills: ["doc.parse", "kb.search", "req.extract", "web.search"],
       knowledge: ["kb-prd-templates", "kb-glossary"],
       status: "done",
@@ -22,7 +32,8 @@ window.AppData = (() => {
       icon: "layers",
       role: "Architecture",
       desc: "Maps requirements onto system components, bounded contexts and service boundaries.",
-      model: "claude-opus-4.1",
+      model: "claude-opus-4-7",
+      provider: "Claude",
       skills: ["diagram.mermaid", "kb.search", "ref.adr"],
       knowledge: ["kb-existing-arch", "kb-adr-library"],
       status: "running",
@@ -35,7 +46,8 @@ window.AppData = (() => {
       icon: "plug",
       role: "Interface",
       desc: "Designs REST/gRPC contracts, payloads, error models and versioning strategy.",
-      model: "claude-sonnet-4.5",
+      model: "claude-sonnet-4-6",
+      provider: "Claude",
       skills: ["openapi.gen", "schema.validate", "mock.server"],
       knowledge: ["kb-api-style-guide"],
       status: "queued",
@@ -48,7 +60,8 @@ window.AppData = (() => {
       icon: "database",
       role: "Data",
       desc: "Produces ER diagrams, storage choices and migration plans.",
-      model: "claude-sonnet-4.5",
+      model: "claude-sonnet-4-6",
+      provider: "Claude",
       skills: ["sql.design", "erd.gen", "capacity.est"],
       knowledge: ["kb-data-catalog"],
       status: "awaiting",
@@ -61,7 +74,8 @@ window.AppData = (() => {
       icon: "shield",
       role: "Review",
       desc: "Evaluates security, compliance, reliability and cost risks.",
-      model: "claude-opus-4.1",
+      model: "claude-opus-4-7",
+      provider: "Claude",
       skills: ["risk.matrix", "sec.threat-model", "cost.estimate"],
       knowledge: ["kb-security-policy", "kb-sla-tiers"],
       status: "queued",
@@ -74,7 +88,8 @@ window.AppData = (() => {
       icon: "pen",
       role: "Delivery",
       desc: "Assembles the final technical design doc with diagrams and trade-off rationale.",
-      model: "claude-haiku-4.5",
+      model: "claude-haiku-4-5",
+      provider: "Claude",
       skills: ["doc.compose", "diagram.render", "md.format"],
       knowledge: ["kb-doc-templates"],
       status: "queued",
@@ -564,7 +579,8 @@ window.AppData = (() => {
       prompt: "You are a senior product analyst. Read the PRD, extract metrics, dimensions, owners, and surface ambiguities for human review.",
       skills: ["doc.parse", "req.extract", "kb.search"],
       meta: { latency: "~3s/turn", tokens: "~2k" },
-      model: "claude-sonnet-4.5",
+      model: "claude-sonnet-4-6",
+      provider: "Claude",
     },
     {
       id: "g-coral-analyst",
@@ -576,7 +592,8 @@ window.AppData = (() => {
       prompt: "You audit metric definitions against the Coral catalogue. Flag duplicates, propose canonical definitions and dimension joins.",
       skills: ["kb.search", "capacity.est"],
       meta: { latency: "~5s/turn", tokens: "~3k" },
-      model: "claude-opus-4.1",
+      model: "claude-opus-4-7",
+      provider: "Claude",
     },
     {
       id: "g-sql-dev-1",
@@ -588,7 +605,8 @@ window.AppData = (() => {
       prompt: "Author production SQL for the hero metric. Optimize for cost and reuse across dashboards.",
       skills: ["sql.design", "schema.validate"],
       meta: { latency: "~6s/turn", tokens: "~4k" },
-      model: "claude-sonnet-4.5",
+      model: "claude-sonnet-4-6",
+      provider: "Claude",
     },
     {
       id: "g-sql-dev-2",
@@ -600,7 +618,8 @@ window.AppData = (() => {
       prompt: "Implement detail-layer SQL aligned with the canonical definitions. Backfill historical dimension drift.",
       skills: ["sql.design", "erd.gen"],
       meta: { latency: "~5s/turn", tokens: "~3k" },
-      model: "claude-sonnet-4.5",
+      model: "claude-sonnet-4-6",
+      provider: "Claude",
     },
     {
       id: "g-sql-dev-3",
@@ -612,7 +631,8 @@ window.AppData = (() => {
       prompt: "Author drill-down SQL behind anomaly hot-cells. Coordinate with QA on attribution paths.",
       skills: ["sql.design", "kb.search"],
       meta: { latency: "~5s/turn", tokens: "~3k" },
-      model: "claude-sonnet-4.5",
+      model: "claude-sonnet-4-6",
+      provider: "Claude",
     },
     {
       id: "g-data-qa",
@@ -624,7 +644,8 @@ window.AppData = (() => {
       prompt: "Cross-check outputs against historical reports. Run assertion suites and produce a launch readiness call.",
       skills: ["schema.validate", "risk.matrix"],
       meta: { latency: "~4s/turn", tokens: "~2k" },
-      model: "claude-haiku-4.5",
+      model: "claude-haiku-4-5",
+      provider: "Claude",
     },
   ];
 
@@ -636,5 +657,5 @@ window.AppData = (() => {
     "Done. Summary: the input was parsed cleanly, 2 conflicts flagged, 1 open question raised for the approver. Artifacts written to the workspace. Handing off to the next agent unless you want to review first.",
   ];
 
-  return { agents, skills, knowledge, templates, projects, sessions, conversation, tasks, edges, nodePos, topologies, agentThreads, approvals, clarifyQuestions, guidedAgentScript, mockReplies };
+  return { agents, skills, knowledge, templates, projects, sessions, conversation, tasks, edges, nodePos, topologies, agentThreads, approvals, clarifyQuestions, guidedAgentScript, mockReplies, providers, modelsByProvider };
 })();

@@ -6,13 +6,18 @@
 const AGENT_FIELDS = [
   { name: "name", kind: "text", label: "Name", placeholder: "e.g. PRD Analyst" },
   { name: "role", kind: "text", label: "Role", placeholder: "e.g. Requirements synthesizer" },
-  { name: "model", kind: "select", label: "Model", options: ["claude-sonnet-4.5", "claude-opus-4", "claude-haiku-4.5", "gpt-5", "gpt-4o", "gemini-2.5-pro"] },
+  { name: "provider", kind: "select", label: "Provider",
+    options: () => (window.AppData.providers || []) },
+  { name: "model", kind: "select", label: "Model",
+    options: (ctx) => ((window.AppData.modelsByProvider || {})[ctx?.provider] || []) },
   { name: "status", kind: "select", label: "Status", options: ["queued", "running", "awaiting", "done", "paused"] },
   { name: "desc", kind: "textarea", label: "Description", rows: 3, placeholder: "What this agent is responsible for…" },
   { name: "icon", kind: "icon", label: "Icon" },
   { name: "color", kind: "color", label: "Color" },
-  { name: "skills", kind: "tags", label: "Skills", placeholder: "+ skill" },
-  { name: "knowledge", kind: "tags", label: "Knowledge bases", placeholder: "+ kb" },
+  { name: "skills", kind: "chips", label: "Skills",
+    options: () => (window.AppData.skills || []).map(s => ({ value: s.name, label: s.name })) },
+  { name: "knowledge", kind: "chips", label: "Knowledge bases",
+    options: () => (window.AppData.knowledge || []).map(k => ({ value: k.id, label: k.name })) },
 ];
 
 const SKILL_FIELDS = [
@@ -92,7 +97,7 @@ function AgentsPage({ store, onOpen }) {
   const filtered = list.filter(a => !q || (a.name + a.role + a.desc).toLowerCase().includes(q.toLowerCase()));
   const crud = useCrud("agents", store);
 
-  const seed = { name: "", role: "", model: "claude-sonnet-4.5", status: "queued", desc: "", icon: "user", color: "#6366f1", skills: [], knowledge: [] };
+  const seed = { name: "", role: "", provider: "Claude", model: "claude-sonnet-4-6", status: "queued", desc: "", icon: "user", color: "#6366f1", skills: [], knowledge: [] };
 
   return (
     <div className="page-wrap">

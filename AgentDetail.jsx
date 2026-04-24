@@ -2,7 +2,7 @@
 
 function AgentDetail({ agentId, store, goBack, goToEntity }) {
   const agent = store.state.agents.find(a => a.id === agentId);
-  const [tab, setTab] = React.useState("config");
+  const [tab, setTab] = React.useState("basics");
 
   if (!agent) {
     return (
@@ -14,6 +14,7 @@ function AgentDetail({ agentId, store, goBack, goToEntity }) {
   }
 
   const tabs = [
+    { id: "basics", label: "Basics", icon: "user" },
     { id: "config", label: "Config", icon: "doc" },
     { id: "preview", label: "Preview", icon: "eye" },
   ];
@@ -27,9 +28,137 @@ function AgentDetail({ agentId, store, goBack, goToEntity }) {
       onTab={setTab}
       savedAt={undefined}
     >
+      {tab === "basics" && <AgentBasicsTab agent={agent} store={store} goToEntity={goToEntity} />}
       {tab === "config" && <AgentConfigTab agent={agent} store={store} />}
       {tab === "preview" && <AgentPreviewTab agent={agent} store={store} goToEntity={goToEntity} />}
     </DetailShell>
+  );
+}
+
+/* ——— Basics tab (visual form editor) ——— */
+function AgentBasicsTab({ agent, store, goToEntity }) {
+  const set = (name, v) => {
+    const patch = { [name]: v };
+    // Provider change resets model to the first of that family if current model no longer fits.
+    if (name === "provider") {
+      const models = (window.AppData.modelsByProvider || {})[v] || [];
+      if (!models.includes(agent.model)) patch.model = models[0] || "";
+    }
+    store.update("agents", agent.id, patch);
+  };
+
+  const providers = window.AppData.providers || [];
+  const models = (window.AppData.modelsByProvider || {})[agent.provider] || [];
+  const statusOptions = [
+    { value: "queued", label: "Queued" },
+    { value: "running", label: "Running" },
+    { value: "awaiting", label: "Awaiting" },
+    { value: "done", label: "Done" },
+    { value: "paused", label: "Paused" },
+  ];
+
+  const skillsField = {
+    name: "skills", kind: "chips", label: "Pick from skill library",
+    options: () => (store.state.skills || []).map(s => ({ value: s.name, label: s.name })),
+  };
+  const kbField = {
+    name: "knowledge", kind: "chips", label: "Pick from knowledge bases",
+    options: () => (store.state.knowledge || []).map(k => ({ value: k.id, label: k.name })),
+  };
+
+  const mountedSkills = (agent.skills || []).length;
+  const mountedKB = (agent.knowledge || []).length;
+
+  return (
+    <div className="preview-pane agent-basics">
+      <section className="agent-hero agent-hero-edit">
+        <div className="hero-avatar" style={{ background: agent.color }}>
+          <Icon name={agent.icon || "user"} size={24} />
+        </div>
+        <div className="hero-main">
+          <input className="hero-title"
+            value={agent.name || ""}
+            onChange={e => set("name", e.target.value)}
+            placeholder="Untitled agent" />
+          <input className="hero-sub"
+            value={agent.role || ""}
+            onChange={e => set("role", e.target.value)}
+            placeholder="Role — what is this agent responsible for?" />
+        </div>
+        <div className="hero-stats agent-stats">
+          <div>
+            <span className="stat-num mono">{agent.provider || "—"}</span>
+            <span>provider</span>
+          </div>
+          <div>
+            <span className="stat-num mono">{agent.model || "—"}</span>
+            <span>model</span>
+          </div>
+          <div>
+            <span className={"status-pill " + (agent.status || "queued")}>{agent.status || "queued"}</span>
+            <span>status</span>
+          </div>
+        </div>
+      </section>
+
+      <section className="editor-block">
+        <header className="block-head">
+          <h4>About</h4>
+          <div className="block-sub">A short public summary that appears in lists and pickers.</div>
+        </header>
+        <textarea className="editor-textarea" rows={3}
+          value={agent.desc || ""}
+          onChange={e => set("desc", e.target.value)}
+          placeholder="What this agent is responsible for…" />
+      </section>
+
+      <section className="editor-block">
+        <header className="block-head">
+          <h4>Runtime</h4>
+          <div className="block-sub">Model provider, weights and operational state.</div>
+        </header>
+        <div className="editor-grid-3">
+          <LabeledInput label="Provider">
+            <select value={agent.provider || ""} onChange={e => set("provider", e.target.value)}>
+              {providers.map(p => {
+                const v = typeof p === "string" ? p : p.value;
+                const l = typeof p === "string" ? p : p.label;
+                return <option key={v} value={v}>{l}</option>;
+              })}
+            </select>
+          </LabeledInput>
+          <LabeledInput label="Model">
+            <select value={agent.model || ""} onChange={e => set("model", e.target.value)}>
+              {models.map(m => <option key={m} value={m}>{m}</option>)}
+            </select>
+          </LabeledInput>
+          <LabeledInput label="Status">
+            <SegControl value={agent.status || "queued"}
+              onChange={v => set("status", v)}
+              options={statusOptions} />
+          </LabeledInput>
+        </div>
+      </section>
+
+      <div className="editor-grid-2">
+        <section className="editor-block">
+          <header className="block-head">
+            <h4>Skills <span className="count-badge">{mountedSkills}</span></h4>
+            <div className="block-sub">Tools this agent can call.</div>
+          </header>
+          <Field field={skillsField} value={agent.skills || []}
+            onChange={v => set("skills", v)} mode="edit" context={agent} />
+        </section>
+        <section className="editor-block">
+          <header className="block-head">
+            <h4>Knowledge <span className="count-badge">{mountedKB}</span></h4>
+            <div className="block-sub">Retrieval sources grounded in search.</div>
+          </header>
+          <Field field={kbField} value={agent.knowledge || []}
+            onChange={v => set("knowledge", v)} mode="edit" context={agent} />
+        </section>
+      </div>
+    </div>
   );
 }
 
@@ -133,6 +262,7 @@ function AgentPreviewTab({ agent, store, goToEntity }) {
           {agent.desc && <div className="preview-desc">{agent.desc}</div>}
         </div>
         <div className="preview-model-col">
+          {agent.provider && <span className="chip">{agent.provider}</span>}
           <span className="chip mono">{agent.model || "—"}</span>
           {agent.status && <span className={"status-pill " + agent.status}>{agent.status}</span>}
         </div>
@@ -238,6 +368,7 @@ function pickAgentFields(a) {
   if (!a) return {};
   const out = {
     name: a.name || "",
+    provider: a.provider || "",
     model: a.model || "",
     description: a.desc || "",
   };
@@ -259,6 +390,7 @@ function pickAgentFields(a) {
 function applyParsed(agent, parsed) {
   const out = { ...agent };
   if ("name" in parsed) out.name = parsed.name ?? "";
+  if ("provider" in parsed) out.provider = parsed.provider ?? "";
   if ("model" in parsed) out.model = parsed.model ?? "";
   if ("description" in parsed) out.desc = parsed.description ?? "";
   if ("system" in parsed) out.systemPrompt = parsed.system ?? "";
@@ -384,4 +516,4 @@ function TagEditor({ value, onChange, placeholder }) {
   );
 }
 
-Object.assign(window, { AgentDetail, CodeEditor, MarkdownView, TagEditor, escapeHtml });
+Object.assign(window, { AgentDetail, AgentBasicsTab, CodeEditor, MarkdownView, TagEditor, escapeHtml });
