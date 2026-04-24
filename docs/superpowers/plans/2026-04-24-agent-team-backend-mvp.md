@@ -3080,4 +3080,548 @@ git commit -m "feat(backend): open sqlite at startup, wire Repository"
 
 ---
 
-(Chunks 4 through 9 will be appended after Chunk 3 is reviewed and approved.)
+## Chunk 4: EventBus + RingBufferSink + WsBroadcastSink
+
+Goal: introduce the fan-out hub that every upstream event flows through, plus two of the three sinks. `EventBus` owns per-session `seq` assignment and `ts` stamping so sinks always see a fully-populated `WSEvent`. `RingBufferSink` keeps the last 500 non-heartbeat events per session for `sync` replay. `WsBroadcastSink` maintains a connection registry and pushes events down subscribed sockets. `MessagePersistSink` (stateful, accumulates blocks into Message rows) and the `ws/connection` wire-up are Chunk 5.
+
+Design note: the bus is the **only** source of `seq`. Callers publish partial events via `Omit<WSEvent, "seq" | "ts">`; the bus stamps and dispatches. When a new connection opens for a session (Chunk 5), it calls `bus.resetSeq(sessionId)` so the counter restarts at 1 per spec §5.1a.
+
+### Task 19: `EventBus` + `EventSink` interface
+
+**Files:**
+- Create: `packages/backend/src/bus/types.ts`
+- Create: `packages/backend/src/bus/event-bus.ts`
+- Create: `packages/backend/src/bus/event-bus.test.ts`
+
+- [ ] **Step 1: Write `packages/backend/src/bus/types.ts`**
+
+```ts
+import type { WSEvent } from "@agent-team/shared";
+
+export type EventContext = {
+  sessionId: string;
+  turnId?: string;
+  subagentId?: string;
+};
+
+export type PublishInput = Omit<WSEvent, "seq" | "ts">;
+
+export interface EventSink {
+  handle(ev: WSEvent, ctx: EventContext): void;
+}
+```
+
+- [ ] **Step 2: Write the failing EventBus test**
+
+Create `packages/backend/src/bus/event-bus.test.ts`:
+
+```ts
+import { describe, expect, it, vi } from "vitest";
+import type { WSEvent } from "@agent-team/shared";
+import { EventBus } from "./event-bus.js";
+import type { EventContext, EventSink, PublishInput } from "./types.js";
+
+const ping = (i = 1): PublishInput => ({
+  type: "heartbeat",
+  payload: {},
+});
+
+describe("EventBus", () => {
+  it("assigns monotonic seq per session starting at 1", () => {
+    const seen: WSEvent[] = [];
+    const sink: EventSink = { handle: (ev) => seen.push(ev) };
+    const bus = new EventBus([sink]);
+    bus.publish(ping(), { sessionId: "s1" });
+    bus.publish(ping(), { sessionId: "s1" });
+    bus.publish(ping(), { sessionId: "s1" });
+    expect(seen.map((e) => e.seq)).toEqual([1, 2, 3]);
+  });
+
+  it("assigns separate seq counters per session", () => {
+    const seen: WSEvent[] = [];
+    const sink: EventSink = { handle: (ev) => seen.push(ev) };
+    const bus = new EventBus([sink]);
+    bus.publish(ping(), { sessionId: "a" });
+    bus.publish(ping(), { sessionId: "b" });
+    bus.publish(ping(), { sessionId: "a" });
+    expect(seen.map((e) => `${e.seq}@s`)).toEqual(["1@s", "1@s", "2@s"]);
+  });
+
+  it("stamps ts with current time (monotonic non-decreasing)", () => {
+    const seen: WSEvent[] = [];
+    const sink: EventSink = { handle: (ev) => seen.push(ev) };
+    const bus = new EventBus([sink]);
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(1_000_000));
+    bus.publish(ping(), { sessionId: "s1" });
+    vi.setSystemTime(new Date(1_000_100));
+    bus.publish(ping(), { sessionId: "s1" });
+    vi.useRealTimers();
+    expect(seen[0]!.ts).toBe(1_000_000);
+    expect(seen[1]!.ts).toBe(1_000_100);
+  });
+
+  it("fans out to all sinks in the order they were registered", () => {
+    const calls: string[] = [];
+    const a: EventSink = { handle: () => calls.push("a") };
+    const b: EventSink = { handle: () => calls.push("b") };
+    const c: EventSink = { handle: () => calls.push("c") };
+    const bus = new EventBus([a, b, c]);
+    bus.publish(ping(), { sessionId: "s1" });
+    expect(calls).toEqual(["a", "b", "c"]);
+  });
+
+  it("a throwing sink does not stop other sinks from receiving the event", () => {
+    const calls: string[] = [];
+    const crashy: EventSink = {
+      handle: () => {
+        throw new Error("boom");
+      },
+    };
+    const good: EventSink = { handle: () => calls.push("good") };
+    const bus = new EventBus([crashy, good], { onSinkError: () => {} });
+    bus.publish(ping(), { sessionId: "s1" });
+    expect(calls).toEqual(["good"]);
+  });
+
+  it("resetSeq rewinds the counter for exactly one session", () => {
+    const seen: WSEvent[] = [];
+    const sink: EventSink = { handle: (ev) => seen.push(ev) };
+    const bus = new EventBus([sink]);
+    bus.publish(ping(), { sessionId: "s1" });
+    bus.publish(ping(), { sessionId: "s2" });
+    bus.resetSeq("s1");
+    bus.publish(ping(), { sessionId: "s1" });
+    bus.publish(ping(), { sessionId: "s2" });
+    expect(seen.map((e) => `${e.seq}`)).toEqual(["1", "1", "1", "2"]);
+  });
+});
+```
+
+- [ ] **Step 3: Run and confirm it fails**
+
+```bash
+pnpm --filter @agent-team/backend test
+```
+Expected: FAIL — `./event-bus.js` does not exist.
+
+- [ ] **Step 4: Implement `packages/backend/src/bus/event-bus.ts`**
+
+```ts
+import type { WSEvent } from "@agent-team/shared";
+import type { EventContext, EventSink, PublishInput } from "./types.js";
+
+export type EventBusOptions = {
+  // Called when a sink throws. Defaults to console.error. Tests override with noop.
+  onSinkError?: (err: unknown, sinkIndex: number, ev: WSEvent) => void;
+};
+
+export class EventBus {
+  private readonly seqBySession = new Map<string, number>();
+
+  constructor(
+    private readonly sinks: readonly EventSink[],
+    private readonly opts: EventBusOptions = {},
+  ) {}
+
+  publish(input: PublishInput, ctx: EventContext): WSEvent {
+    const nextSeq = (this.seqBySession.get(ctx.sessionId) ?? 0) + 1;
+    this.seqBySession.set(ctx.sessionId, nextSeq);
+    const ev = { ...input, seq: nextSeq, ts: Date.now() } as WSEvent;
+    for (let i = 0; i < this.sinks.length; i++) {
+      try {
+        this.sinks[i]!.handle(ev, ctx);
+      } catch (err) {
+        const onError =
+          this.opts.onSinkError ??
+          ((e, idx) => {
+            // eslint-disable-next-line no-console
+            console.error("EventBus sink", idx, "threw:", e);
+          });
+        onError(err, i, ev);
+      }
+    }
+    return ev;
+  }
+
+  resetSeq(sessionId: string): void {
+    this.seqBySession.set(sessionId, 0);
+  }
+
+  peekSeq(sessionId: string): number {
+    return this.seqBySession.get(sessionId) ?? 0;
+  }
+}
+```
+
+- [ ] **Step 5: Run and confirm it passes**
+
+```bash
+pnpm --filter @agent-team/backend test
+```
+Expected: PASS — all 6 cases green.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add packages/backend/src/bus/types.ts \
+        packages/backend/src/bus/event-bus.ts \
+        packages/backend/src/bus/event-bus.test.ts
+git commit -m "feat(backend): add EventBus with per-session seq + sink fan-out"
+```
+
+### Task 20: `RingBufferSink`
+
+**Files:**
+- Create: `packages/backend/src/bus/ring-buffer-sink.ts`
+- Create: `packages/backend/src/bus/ring-buffer-sink.test.ts`
+
+- [ ] **Step 1: Write the failing test**
+
+Create `packages/backend/src/bus/ring-buffer-sink.test.ts`:
+
+```ts
+import { describe, expect, it } from "vitest";
+import type { WSEvent } from "@agent-team/shared";
+import { EventBus } from "./event-bus.js";
+import { RingBufferSink } from "./ring-buffer-sink.js";
+
+const evt = (seq = 0): { type: "heartbeat"; payload: Record<string, never> } => ({
+  type: "heartbeat",
+  payload: {},
+});
+
+// Non-heartbeat event we can publish repeatedly
+const noisy = () =>
+  ({ type: "block.text.delta", payload: { messageId: "m", blockIdx: 0, text: "x" } }) as const;
+
+describe("RingBufferSink", () => {
+  it("stores up to `capacity` non-heartbeat events per session", () => {
+    const sink = new RingBufferSink({ capacity: 3 });
+    const bus = new EventBus([sink]);
+    for (let i = 0; i < 5; i++) bus.publish(noisy(), { sessionId: "s1" });
+    const got = sink.replaySince("s1", 0);
+    expect(got.map((e) => e.seq)).toEqual([3, 4, 5]);
+  });
+
+  it("never records heartbeat events", () => {
+    const sink = new RingBufferSink({ capacity: 10 });
+    const bus = new EventBus([sink]);
+    bus.publish(evt(), { sessionId: "s1" });
+    bus.publish(noisy(), { sessionId: "s1" });
+    bus.publish(evt(), { sessionId: "s1" });
+    bus.publish(noisy(), { sessionId: "s1" });
+    const got = sink.replaySince("s1", 0);
+    expect(got.map((e) => e.type)).toEqual(["block.text.delta", "block.text.delta"]);
+  });
+
+  it("replaySince returns only events with seq > sinceSeq", () => {
+    const sink = new RingBufferSink({ capacity: 10 });
+    const bus = new EventBus([sink]);
+    for (let i = 0; i < 5; i++) bus.publish(noisy(), { sessionId: "s1" });
+    const got = sink.replaySince("s1", 3);
+    expect(got.map((e) => e.seq)).toEqual([4, 5]);
+  });
+
+  it("isolates ring buffers between sessions", () => {
+    const sink = new RingBufferSink({ capacity: 10 });
+    const bus = new EventBus([sink]);
+    bus.publish(noisy(), { sessionId: "a" });
+    bus.publish(noisy(), { sessionId: "b" });
+    bus.publish(noisy(), { sessionId: "a" });
+    expect(sink.replaySince("a", 0)).toHaveLength(2);
+    expect(sink.replaySince("b", 0)).toHaveLength(1);
+  });
+
+  it("replaySince returns [] when sinceSeq exceeds latest", () => {
+    const sink = new RingBufferSink({ capacity: 10 });
+    const bus = new EventBus([sink]);
+    bus.publish(noisy(), { sessionId: "s1" });
+    expect(sink.replaySince("s1", 999)).toEqual([]);
+  });
+
+  it("replaySince returns [] for unknown session", () => {
+    const sink = new RingBufferSink({ capacity: 10 });
+    expect(sink.replaySince("nope", 0)).toEqual([]);
+  });
+
+  it("clear wipes a single session's buffer", () => {
+    const sink = new RingBufferSink({ capacity: 10 });
+    const bus = new EventBus([sink]);
+    bus.publish(noisy(), { sessionId: "s1" });
+    bus.publish(noisy(), { sessionId: "s2" });
+    sink.clear("s1");
+    expect(sink.replaySince("s1", 0)).toEqual([]);
+    expect(sink.replaySince("s2", 0)).toHaveLength(1);
+  });
+});
+```
+
+- [ ] **Step 2: Run and confirm it fails**
+
+```bash
+pnpm --filter @agent-team/backend test
+```
+Expected: FAIL — `./ring-buffer-sink.js` does not exist.
+
+- [ ] **Step 3: Implement `packages/backend/src/bus/ring-buffer-sink.ts`**
+
+```ts
+import type { WSEvent } from "@agent-team/shared";
+import type { EventContext, EventSink } from "./types.js";
+
+export type RingBufferOptions = {
+  capacity: number;
+};
+
+// Simple per-session ring buffer. Non-heartbeat events only (spec §5.1a).
+// Capacity is the max retained events; older entries are evicted FIFO.
+export class RingBufferSink implements EventSink {
+  private readonly buffers = new Map<string, WSEvent[]>();
+
+  constructor(private readonly opts: RingBufferOptions) {
+    if (opts.capacity <= 0) {
+      throw new Error("RingBufferSink capacity must be > 0");
+    }
+  }
+
+  handle(ev: WSEvent, ctx: EventContext): void {
+    if (ev.type === "heartbeat") return;
+    let buf = this.buffers.get(ctx.sessionId);
+    if (!buf) {
+      buf = [];
+      this.buffers.set(ctx.sessionId, buf);
+    }
+    buf.push(ev);
+    if (buf.length > this.opts.capacity) {
+      buf.splice(0, buf.length - this.opts.capacity);
+    }
+  }
+
+  replaySince(sessionId: string, sinceSeq: number): WSEvent[] {
+    const buf = this.buffers.get(sessionId);
+    if (!buf) return [];
+    // Events are appended in seq order, so slice from the first > sinceSeq.
+    const idx = buf.findIndex((e) => e.seq > sinceSeq);
+    return idx === -1 ? [] : buf.slice(idx);
+  }
+
+  clear(sessionId: string): void {
+    this.buffers.delete(sessionId);
+  }
+}
+```
+
+- [ ] **Step 4: Run and confirm it passes**
+
+```bash
+pnpm --filter @agent-team/backend test
+```
+Expected: PASS — all 7 cases green.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add packages/backend/src/bus/ring-buffer-sink.ts \
+        packages/backend/src/bus/ring-buffer-sink.test.ts
+git commit -m "feat(backend): add RingBufferSink for sync replay"
+```
+
+### Task 21: `WsBroadcastSink`
+
+**Files:**
+- Create: `packages/backend/src/bus/ws-broadcast-sink.ts`
+- Create: `packages/backend/src/bus/ws-broadcast-sink.test.ts`
+
+The sink maintains a registry of subscribed connections, one-or-more per session. Each subscription carries a callback that serializes + sends the event. Unsubscription is by connection id. Because MVP only has one active connection per session at a time, subscriptions are typically a single entry, but the registry is designed to handle N without assuming N=1.
+
+- [ ] **Step 1: Write the failing test**
+
+Create `packages/backend/src/bus/ws-broadcast-sink.test.ts`:
+
+```ts
+import { describe, expect, it } from "vitest";
+import type { WSEvent } from "@agent-team/shared";
+import { EventBus } from "./event-bus.js";
+import { WsBroadcastSink } from "./ws-broadcast-sink.js";
+
+const noisy = () =>
+  ({ type: "block.text.delta", payload: { messageId: "m", blockIdx: 0, text: "x" } }) as const;
+
+describe("WsBroadcastSink", () => {
+  it("routes events only to subscribers of the same session", () => {
+    const sink = new WsBroadcastSink();
+    const bus = new EventBus([sink]);
+    const a: WSEvent[] = [];
+    const b: WSEvent[] = [];
+    sink.subscribe("s1", "conn-1", (ev) => a.push(ev));
+    sink.subscribe("s2", "conn-2", (ev) => b.push(ev));
+    bus.publish(noisy(), { sessionId: "s1" });
+    bus.publish(noisy(), { sessionId: "s2" });
+    expect(a).toHaveLength(1);
+    expect(b).toHaveLength(1);
+    expect(a[0]!.seq).toBe(1);
+    expect(b[0]!.seq).toBe(1);
+  });
+
+  it("broadcasts to all subscribers of a session", () => {
+    const sink = new WsBroadcastSink();
+    const bus = new EventBus([sink]);
+    const a: WSEvent[] = [];
+    const b: WSEvent[] = [];
+    sink.subscribe("s1", "conn-1", (ev) => a.push(ev));
+    sink.subscribe("s1", "conn-2", (ev) => b.push(ev));
+    bus.publish(noisy(), { sessionId: "s1" });
+    expect(a).toHaveLength(1);
+    expect(b).toHaveLength(1);
+  });
+
+  it("unsubscribing removes delivery", () => {
+    const sink = new WsBroadcastSink();
+    const bus = new EventBus([sink]);
+    const received: WSEvent[] = [];
+    sink.subscribe("s1", "conn-1", (ev) => received.push(ev));
+    bus.publish(noisy(), { sessionId: "s1" });
+    sink.unsubscribe("conn-1");
+    bus.publish(noisy(), { sessionId: "s1" });
+    expect(received).toHaveLength(1);
+  });
+
+  it("tolerates a sender callback that throws — other subscribers still receive", () => {
+    const sink = new WsBroadcastSink({ onSenderError: () => {} });
+    const bus = new EventBus([sink]);
+    const good: WSEvent[] = [];
+    sink.subscribe("s1", "bad", () => {
+      throw new Error("socket closed");
+    });
+    sink.subscribe("s1", "good", (ev) => good.push(ev));
+    bus.publish(noisy(), { sessionId: "s1" });
+    expect(good).toHaveLength(1);
+  });
+
+  it("connectionCount reports active subscribers across sessions", () => {
+    const sink = new WsBroadcastSink();
+    sink.subscribe("a", "c1", () => {});
+    sink.subscribe("a", "c2", () => {});
+    sink.subscribe("b", "c3", () => {});
+    expect(sink.connectionCount()).toBe(3);
+    sink.unsubscribe("c2");
+    expect(sink.connectionCount()).toBe(2);
+  });
+
+  it("publishing to a session with zero subscribers is a no-op (but EventBus still records in other sinks)", () => {
+    const sink = new WsBroadcastSink();
+    const bus = new EventBus([sink]);
+    expect(() => bus.publish(noisy(), { sessionId: "orphan" })).not.toThrow();
+  });
+
+  it("unsubscribe is idempotent for unknown connection ids", () => {
+    const sink = new WsBroadcastSink();
+    expect(() => sink.unsubscribe("never-existed")).not.toThrow();
+  });
+});
+```
+
+- [ ] **Step 2: Run and confirm it fails**
+
+```bash
+pnpm --filter @agent-team/backend test
+```
+Expected: FAIL — `./ws-broadcast-sink.js` does not exist.
+
+- [ ] **Step 3: Implement `packages/backend/src/bus/ws-broadcast-sink.ts`**
+
+```ts
+import type { WSEvent } from "@agent-team/shared";
+import type { EventContext, EventSink } from "./types.js";
+
+export type SendFn = (ev: WSEvent) => void;
+
+export type WsBroadcastOptions = {
+  onSenderError?: (err: unknown, connectionId: string, ev: WSEvent) => void;
+};
+
+type Subscription = {
+  connectionId: string;
+  sessionId: string;
+  send: SendFn;
+};
+
+export class WsBroadcastSink implements EventSink {
+  private readonly bySession = new Map<string, Map<string, Subscription>>();
+  private readonly byConnection = new Map<string, Subscription>();
+
+  constructor(private readonly opts: WsBroadcastOptions = {}) {}
+
+  subscribe(sessionId: string, connectionId: string, send: SendFn): void {
+    const sub: Subscription = { sessionId, connectionId, send };
+    let perSession = this.bySession.get(sessionId);
+    if (!perSession) {
+      perSession = new Map();
+      this.bySession.set(sessionId, perSession);
+    }
+    perSession.set(connectionId, sub);
+    this.byConnection.set(connectionId, sub);
+  }
+
+  unsubscribe(connectionId: string): void {
+    const sub = this.byConnection.get(connectionId);
+    if (!sub) return;
+    this.byConnection.delete(connectionId);
+    const perSession = this.bySession.get(sub.sessionId);
+    if (perSession) {
+      perSession.delete(connectionId);
+      if (perSession.size === 0) this.bySession.delete(sub.sessionId);
+    }
+  }
+
+  connectionCount(): number {
+    return this.byConnection.size;
+  }
+
+  handle(ev: WSEvent, ctx: EventContext): void {
+    const perSession = this.bySession.get(ctx.sessionId);
+    if (!perSession) return;
+    for (const sub of perSession.values()) {
+      try {
+        sub.send(ev);
+      } catch (err) {
+        const onErr =
+          this.opts.onSenderError ??
+          ((e, cid) => {
+            // eslint-disable-next-line no-console
+            console.error("WsBroadcastSink send failed for", cid, e);
+          });
+        onErr(err, sub.connectionId, ev);
+      }
+    }
+  }
+}
+```
+
+- [ ] **Step 4: Run and confirm it passes**
+
+```bash
+pnpm --filter @agent-team/backend test
+```
+Expected: PASS — all 7 cases green.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add packages/backend/src/bus/ws-broadcast-sink.ts \
+        packages/backend/src/bus/ws-broadcast-sink.test.ts
+git commit -m "feat(backend): add WsBroadcastSink with connection registry"
+```
+
+### Chunk 4 exit criteria
+
+- `pnpm -r test` passes; bus suites add ~20 new test cases.
+- `EventBus` is the single stamper of `seq` and `ts`; no other module assigns either field.
+- `RingBufferSink.replaySince(sessionId, sinceSeq)` returns the correct slice or `[]` in every edge case covered by tests.
+- `WsBroadcastSink` exposes `subscribe / unsubscribe / connectionCount / handle` and is the unique path from events to WebSockets.
+- `index.ts` is NOT yet updated to use the bus — wiring lands in Chunk 5 along with `MessagePersistSink` and `ws/connection`.
+
+---
+
+(Chunks 5 through 9 will be appended after Chunk 4 is reviewed and approved.)
