@@ -3653,4 +3653,532 @@ git commit -m "feat(backend): add WsBroadcastSink with connection registry"
 
 ---
 
-(Chunks 5 through 9 will be appended after Chunk 4 is reviewed and approved.)
+## Chunk 5: MessagePersistSink + Bus Wire-up in `index.ts`
+
+Goal: finish the bus trio by adding `MessagePersistSink` — a stateful sink that accumulates `Block[]` per in-flight assistant message and writes one `messages` row on `turn.end`. Then wire `EventBus` + all three sinks into `index.ts` and update `/metrics` to report real values from the sinks. `ws/connection` routing still waits for Chunk 6 where `SessionService` exists to receive C2S commands.
+
+**Deferred inside this chunk:** `subagent.start` / `subagent.event` / `subagent.end` handling. `MessagePersistSink` records these as `raw` blocks for now; full `Block { type: "subagent" }` nesting is added later when `TurnOrchestrator` emits the events end-to-end. This keeps Chunk 5 focused.
+
+### Task 22: `MessagePersistSink`
+
+**Files:**
+- Create: `packages/backend/src/bus/message-persist-sink.ts`
+- Create: `packages/backend/src/bus/message-persist-sink.test.ts`
+
+- [ ] **Step 1: Write the failing test**
+
+Create `packages/backend/src/bus/message-persist-sink.test.ts`:
+
+```ts
+import { beforeEach, describe, expect, it } from "vitest";
+import type { Block, WSEvent } from "@agent-team/shared";
+import { openDb, type Db } from "../db/connection.js";
+import { Repository } from "../db/repository.js";
+import { EventBus } from "./event-bus.js";
+import { MessagePersistSink } from "./message-persist-sink.js";
+
+const seedSessionAndTurn = (r: Repository) => {
+  r.createSession({
+    id: "s1",
+    title: "T",
+    agent: "claude",
+    model: "m",
+    providerSessionId: null,
+    systemPrompt: null,
+    cwd: "/s1",
+    createdAt: 0,
+  });
+  r.insertTurn({
+    id: "t1",
+    sessionId: "s1",
+    sequenceNum: 1,
+    status: "in_progress",
+    preTurnCommit: "c0",
+    firstUserText: "hi",
+    createdAt: 1,
+  });
+};
+
+describe("MessagePersistSink", () => {
+  let db: Db;
+  let repo: Repository;
+  let sink: MessagePersistSink;
+  let bus: EventBus;
+
+  beforeEach(() => {
+    db = openDb(":memory:");
+    repo = new Repository(db);
+    seedSessionAndTurn(repo);
+    sink = new MessagePersistSink(repo);
+    bus = new EventBus([sink]);
+  });
+
+  it("persists one assistant message on turn.end assembling text delta chunks", () => {
+    bus.publish({ type: "turn.start", payload: { turnId: "t1", userMessage: {
+      id: "mu", role: "user", blocks: [], turnId: "t1", createdAt: 1,
+    } } }, { sessionId: "s1", turnId: "t1" });
+    bus.publish({ type: "message.start", payload: { turnId: "t1", messageId: "ma", role: "assistant" } },
+                { sessionId: "s1", turnId: "t1" });
+    bus.publish({ type: "block.text.delta", payload: { messageId: "ma", blockIdx: 0, text: "He" } },
+                { sessionId: "s1", turnId: "t1" });
+    bus.publish({ type: "block.text.delta", payload: { messageId: "ma", blockIdx: 0, text: "llo" } },
+                { sessionId: "s1", turnId: "t1" });
+    bus.publish({ type: "message.end", payload: { messageId: "ma" } },
+                { sessionId: "s1", turnId: "t1" });
+    bus.publish({ type: "turn.end", payload: { turnId: "t1", stopReason: "end_turn",
+                  usage: { inputTokens: 1, outputTokens: 2 } } },
+                { sessionId: "s1", turnId: "t1" });
+
+    const msgs = repo.listMessagesBySession("s1");
+    expect(msgs).toHaveLength(1);
+    expect(msgs[0]!.role).toBe("assistant");
+    expect(msgs[0]!.stopReason).toBe("end_turn");
+    expect(msgs[0]!.usage).toEqual({ inputTokens: 1, outputTokens: 2 });
+    const blocks = JSON.parse(msgs[0]!.blocksJson) as Block[];
+    expect(blocks).toEqual([{ type: "text", text: "Hello" }]);
+  });
+
+  it("accumulates multi-block messages (text + tool_use + text) at distinct blockIdx", () => {
+    bus.publish({ type: "turn.start", payload: { turnId: "t1", userMessage: {
+      id: "mu", role: "user", blocks: [], turnId: "t1", createdAt: 1 } } },
+      { sessionId: "s1", turnId: "t1" });
+    bus.publish({ type: "message.start", payload: { turnId: "t1", messageId: "ma", role: "assistant" } },
+                { sessionId: "s1", turnId: "t1" });
+    bus.publish({ type: "block.text.delta", payload: { messageId: "ma", blockIdx: 0, text: "A" } },
+                { sessionId: "s1", turnId: "t1" });
+    bus.publish({ type: "block.tool_use",
+                  payload: { messageId: "ma", blockIdx: 1, toolCallId: "c1", name: "Bash", input: { cmd: "ls" } } },
+                { sessionId: "s1", turnId: "t1" });
+    bus.publish({ type: "block.text.delta", payload: { messageId: "ma", blockIdx: 2, text: "B" } },
+                { sessionId: "s1", turnId: "t1" });
+    bus.publish({ type: "message.end", payload: { messageId: "ma" } },
+                { sessionId: "s1", turnId: "t1" });
+    bus.publish({ type: "turn.end", payload: { turnId: "t1", stopReason: "end_turn" } },
+                { sessionId: "s1", turnId: "t1" });
+
+    const blocks = JSON.parse(repo.listMessagesBySession("s1")[0]!.blocksJson) as Block[];
+    expect(blocks).toHaveLength(3);
+    expect(blocks[0]).toEqual({ type: "text", text: "A" });
+    expect(blocks[1]).toEqual({ type: "tool_use", toolCallId: "c1", name: "Bash", input: { cmd: "ls" } });
+    expect(blocks[2]).toEqual({ type: "text", text: "B" });
+  });
+
+  it("absorbs todo.update, skill.invoked, block.raw, thinking delta, tool_result", () => {
+    bus.publish({ type: "turn.start", payload: { turnId: "t1", userMessage: {
+      id: "mu", role: "user", blocks: [], turnId: "t1", createdAt: 1 } } },
+      { sessionId: "s1", turnId: "t1" });
+    bus.publish({ type: "message.start", payload: { turnId: "t1", messageId: "ma", role: "assistant" } },
+                { sessionId: "s1", turnId: "t1" });
+    bus.publish({ type: "block.thinking.delta", payload: { messageId: "ma", blockIdx: 0, text: "reason" } },
+                { sessionId: "s1", turnId: "t1" });
+    bus.publish({ type: "todo.update",
+                  payload: { messageId: "ma", blockIdx: 1,
+                             todos: [{ id: "t1", subject: "do", status: "pending" }] } },
+                { sessionId: "s1", turnId: "t1" });
+    bus.publish({ type: "skill.invoked",
+                  payload: { messageId: "ma", blockIdx: 2, skillName: "sp:bs", source: "model" } },
+                { sessionId: "s1", turnId: "t1" });
+    bus.publish({ type: "block.raw",
+                  payload: { messageId: "ma", blockIdx: 3, subtype: "future_v1", data: { x: 1 } } },
+                { sessionId: "s1", turnId: "t1" });
+    bus.publish({ type: "block.tool_result",
+                  payload: { toolCallId: "ignored-routes-by-messageId", output: null, isError: false } },
+                { sessionId: "s1", turnId: "t1" });
+    bus.publish({ type: "message.end", payload: { messageId: "ma" } },
+                { sessionId: "s1", turnId: "t1" });
+    bus.publish({ type: "turn.end", payload: { turnId: "t1", stopReason: "end_turn" } },
+                { sessionId: "s1", turnId: "t1" });
+
+    const blocks = JSON.parse(repo.listMessagesBySession("s1")[0]!.blocksJson) as Block[];
+    // tool_result is NOT added to the assistant message — tool_results belong
+    // to the conceptual "user message returning tool output" in the SDK
+    // protocol. For MVP Chunk 5 we simply drop it from the persisted assistant
+    // blocks; the WS layer still broadcasts it. Frontend Phase 1 shows it
+    // via the live event stream, not via the replayed history.
+    expect(blocks).toEqual([
+      { type: "thinking", text: "reason" },
+      { type: "todo", todos: [{ id: "t1", subject: "do", status: "pending" }] },
+      { type: "skill", skillName: "sp:bs" },
+      { type: "raw", subtype: "future_v1", data: { x: 1 } },
+    ]);
+  });
+
+  it("persists multiple assistant messages within a single turn", () => {
+    bus.publish({ type: "turn.start", payload: { turnId: "t1", userMessage: {
+      id: "mu", role: "user", blocks: [], turnId: "t1", createdAt: 1 } } },
+      { sessionId: "s1", turnId: "t1" });
+    for (const msgId of ["ma", "mb"]) {
+      bus.publish({ type: "message.start", payload: { turnId: "t1", messageId: msgId, role: "assistant" } },
+                  { sessionId: "s1", turnId: "t1" });
+      bus.publish({ type: "block.text.delta", payload: { messageId: msgId, blockIdx: 0, text: msgId } },
+                  { sessionId: "s1", turnId: "t1" });
+      bus.publish({ type: "message.end", payload: { messageId: msgId } },
+                  { sessionId: "s1", turnId: "t1" });
+    }
+    bus.publish({ type: "turn.end", payload: { turnId: "t1", stopReason: "end_turn" } },
+                { sessionId: "s1", turnId: "t1" });
+
+    const msgs = repo.listMessagesBySession("s1");
+    expect(msgs).toHaveLength(2);
+    expect(msgs.map((m) => m.id)).toEqual(["ma", "mb"]);
+    expect(JSON.parse(msgs[0]!.blocksJson)).toEqual([{ type: "text", text: "ma" }]);
+    expect(JSON.parse(msgs[1]!.blocksJson)).toEqual([{ type: "text", text: "mb" }]);
+  });
+
+  it("drops state across turn.end so a new turn starts clean", () => {
+    const pubAllForMsg = (turnId: string, msgId: string, text: string) => {
+      bus.publish({ type: "turn.start", payload: { turnId, userMessage: {
+        id: "mu", role: "user", blocks: [], turnId, createdAt: 1 } } },
+        { sessionId: "s1", turnId });
+      bus.publish({ type: "message.start", payload: { turnId, messageId: msgId, role: "assistant" } },
+                  { sessionId: "s1", turnId });
+      bus.publish({ type: "block.text.delta", payload: { messageId: msgId, blockIdx: 0, text } },
+                  { sessionId: "s1", turnId });
+      bus.publish({ type: "message.end", payload: { messageId: msgId } }, { sessionId: "s1", turnId });
+      bus.publish({ type: "turn.end", payload: { turnId, stopReason: "end_turn" } }, { sessionId: "s1", turnId });
+    };
+    pubAllForMsg("t1", "ma", "first");
+    repo.insertTurn({
+      id: "t2", sessionId: "s1", sequenceNum: 2,
+      status: "in_progress", preTurnCommit: "c1", firstUserText: "again", createdAt: 10,
+    });
+    pubAllForMsg("t2", "mb", "second");
+
+    const msgs = repo.listMessagesBySession("s1");
+    expect(msgs).toHaveLength(2);
+    expect(msgs.map((m) => m.turnId)).toEqual(["t1", "t2"]);
+  });
+
+  it("ignores events for unknown messageId without throwing", () => {
+    expect(() => {
+      bus.publish({ type: "block.text.delta", payload: { messageId: "nope", blockIdx: 0, text: "x" } },
+                  { sessionId: "s1", turnId: "t1" });
+    }).not.toThrow();
+    // No message should exist — message.start never fired.
+    expect(repo.listMessagesBySession("s1")).toHaveLength(0);
+  });
+});
+```
+
+- [ ] **Step 2: Run and confirm it fails**
+
+```bash
+pnpm --filter @agent-team/backend test
+```
+Expected: FAIL — `./message-persist-sink.js` does not exist.
+
+- [ ] **Step 3: Implement `packages/backend/src/bus/message-persist-sink.ts`**
+
+```ts
+import type { Block, StopReason, TodoItem, TokenUsage, WSEvent } from "@agent-team/shared";
+import type { Repository } from "../db/repository.js";
+import type { EventContext, EventSink } from "./types.js";
+
+type MessageAccum = {
+  messageId: string;
+  sessionId: string;
+  turnId: string;
+  blocks: Block[];
+  createdAt: number;
+};
+
+export class MessagePersistSink implements EventSink {
+  // messageId -> accumulator
+  private readonly active = new Map<string, MessageAccum>();
+  // turnId -> ordered list of messageIds that belong to it
+  private readonly byTurn = new Map<string, string[]>();
+
+  constructor(private readonly repo: Repository) {}
+
+  handle(ev: WSEvent, ctx: EventContext): void {
+    switch (ev.type) {
+      case "turn.start":
+        this.byTurn.set(ev.payload.turnId, []);
+        return;
+
+      case "message.start":
+        this.active.set(ev.payload.messageId, {
+          messageId: ev.payload.messageId,
+          sessionId: ctx.sessionId,
+          turnId: ev.payload.turnId,
+          blocks: [],
+          createdAt: ev.ts,
+        });
+        this.byTurn.get(ev.payload.turnId)?.push(ev.payload.messageId);
+        return;
+
+      case "block.text.delta":
+        this.appendText(ev.payload.messageId, ev.payload.blockIdx, "text", ev.payload.text);
+        return;
+
+      case "block.thinking.delta":
+        this.appendText(ev.payload.messageId, ev.payload.blockIdx, "thinking", ev.payload.text);
+        return;
+
+      case "block.tool_use":
+        this.setBlock(ev.payload.messageId, ev.payload.blockIdx, {
+          type: "tool_use",
+          toolCallId: ev.payload.toolCallId,
+          name: ev.payload.name,
+          input: ev.payload.input,
+        });
+        return;
+
+      case "block.tool_result":
+        // tool_result events do not belong to the assistant message being
+        // persisted. They are broadcast live for UI but not written into
+        // the assistant's Block[]. See MVP Chunk 5 design note.
+        return;
+
+      case "block.raw":
+        if (ev.payload.messageId !== undefined && ev.payload.blockIdx !== undefined) {
+          this.setBlock(ev.payload.messageId, ev.payload.blockIdx, {
+            type: "raw",
+            subtype: ev.payload.subtype,
+            data: ev.payload.data,
+          });
+        }
+        return;
+
+      case "todo.update":
+        this.setBlock(ev.payload.messageId, ev.payload.blockIdx, {
+          type: "todo",
+          todos: ev.payload.todos,
+        });
+        return;
+
+      case "skill.invoked": {
+        const payload = ev.payload;
+        const block: Block =
+          payload.args !== undefined
+            ? { type: "skill", skillName: payload.skillName, args: payload.args }
+            : { type: "skill", skillName: payload.skillName };
+        this.setBlock(payload.messageId, payload.blockIdx, block);
+        return;
+      }
+
+      case "message.end":
+        // No action — we flush on turn.end. `message.end` is a marker
+        // for the WS/UI layer, not for persistence.
+        return;
+
+      case "turn.end":
+        this.flushTurn(ev.payload.turnId, ev.payload.stopReason, ev.payload.usage);
+        return;
+
+      // Deferred events — covered when TurnOrchestrator emits them in later chunks.
+      case "subagent.start":
+      case "subagent.event":
+      case "subagent.end":
+      case "askuser.request":
+      case "permission.request":
+      case "session.ready":
+      case "session.list.result":
+      case "turn.list.result":
+      case "session.rollback.complete":
+      case "heartbeat":
+      case "error":
+        return;
+
+      default: {
+        const _exhaustive: never = ev;
+        void _exhaustive;
+        return;
+      }
+    }
+  }
+
+  private ensureAccum(messageId: string): MessageAccum | null {
+    return this.active.get(messageId) ?? null;
+  }
+
+  private setBlock(messageId: string, blockIdx: number, block: Block): void {
+    const m = this.ensureAccum(messageId);
+    if (!m) return;
+    m.blocks[blockIdx] = block;
+  }
+
+  private appendText(
+    messageId: string,
+    blockIdx: number,
+    kind: "text" | "thinking",
+    text: string,
+  ): void {
+    const m = this.ensureAccum(messageId);
+    if (!m) return;
+    const existing = m.blocks[blockIdx];
+    if (existing && existing.type === kind) {
+      existing.text += text;
+    } else {
+      m.blocks[blockIdx] = { type: kind, text };
+    }
+  }
+
+  private flushTurn(
+    turnId: string,
+    stopReason: StopReason,
+    usage: TokenUsage | undefined,
+  ): void {
+    const ids = this.byTurn.get(turnId);
+    if (!ids) return;
+    this.repo.runTx(() => {
+      for (const id of ids) {
+        const m = this.active.get(id);
+        if (!m) continue;
+        this.repo.insertMessage({
+          id: m.messageId,
+          sessionId: m.sessionId,
+          turnId: m.turnId,
+          role: "assistant",
+          blocksJson: JSON.stringify(m.blocks),
+          stopReason,
+          usage: usage ?? null,
+          createdAt: m.createdAt,
+        });
+      }
+    });
+    for (const id of ids) this.active.delete(id);
+    this.byTurn.delete(turnId);
+  }
+}
+```
+
+- [ ] **Step 4: Run and confirm it passes**
+
+```bash
+pnpm --filter @agent-team/backend test
+```
+Expected: PASS — all 6 MessagePersistSink cases green, plus earlier suites still green.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add packages/backend/src/bus/message-persist-sink.ts \
+        packages/backend/src/bus/message-persist-sink.test.ts
+git commit -m "feat(backend): add MessagePersistSink (turn-end flush)"
+```
+
+### Task 23: Wire bus + sinks into `index.ts`, surface real `/metrics`
+
+**Files:**
+- Modify: `packages/backend/src/http/server.ts` (optional — already MetricsSource-compatible)
+- Modify: `packages/backend/src/index.ts`
+
+- [ ] **Step 1: Update `packages/backend/src/index.ts` to construct the bus + sinks**
+
+```ts
+import { mkdirSync } from "node:fs";
+import { dirname } from "node:path";
+import { EventBus } from "./bus/event-bus.js";
+import { MessagePersistSink } from "./bus/message-persist-sink.js";
+import { RingBufferSink } from "./bus/ring-buffer-sink.js";
+import { WsBroadcastSink } from "./bus/ws-broadcast-sink.js";
+import { loadConfig } from "./config.js";
+import { openDb } from "./db/connection.js";
+import { Repository } from "./db/repository.js";
+import { createHttpServer, type MetricsSource } from "./http/server.js";
+import { createLogger } from "./logger.js";
+import { attachWsServer } from "./ws/server.js";
+
+async function main(): Promise<void> {
+  const config = loadConfig();
+  const logger = createLogger(config.logLevel);
+
+  mkdirSync(dirname(config.dbPath), { recursive: true });
+  const db = openDb(config.dbPath);
+  const repo = new Repository(db);
+  logger.info({ dbPath: config.dbPath }, "db opened");
+
+  const ringBuffer = new RingBufferSink({ capacity: 500 });
+  const wsBroadcast = new WsBroadcastSink({
+    onSenderError: (err, connectionId) =>
+      logger.warn({ connectionId, err }, "ws send failed"),
+  });
+  const messagePersist = new MessagePersistSink(repo);
+  const bus = new EventBus([wsBroadcast, ringBuffer, messagePersist], {
+    onSinkError: (err, sinkIndex) =>
+      logger.error({ sinkIndex, err }, "event sink threw"),
+  });
+  // `bus` will be handed to SessionService/TurnOrchestrator in Chunk 6.
+  void bus;
+
+  const metrics: MetricsSource = {
+    activeSessions: () => 0, // filled in once SessionService exists (Chunk 6)
+    wsConnections: () => wsBroadcast.connectionCount(),
+    totalTurns: () => {
+      const row = db.prepare("SELECT COUNT(*) AS c FROM turns").get() as { c: number };
+      return row.c;
+    },
+    orphanedTurns: () => {
+      const row = db
+        .prepare("SELECT COUNT(*) AS c FROM turns WHERE status = 'orphaned'")
+        .get() as { c: number };
+      return row.c;
+    },
+  };
+
+  const http = await createHttpServer({ port: config.port, logger, metrics });
+  attachWsServer({ httpServer: http.server, path: "/ws", logger });
+
+  const shutdown = async (signal: string) => {
+    logger.info({ signal }, "shutting down");
+    await http.close();
+    db.close();
+    process.exit(0);
+  };
+  process.on("SIGINT", () => shutdown("SIGINT"));
+  process.on("SIGTERM", () => shutdown("SIGTERM"));
+}
+
+main().catch((err) => {
+  // eslint-disable-next-line no-console
+  console.error(err);
+  process.exit(1);
+});
+```
+
+- [ ] **Step 2: Verify build**
+
+```bash
+pnpm --filter @agent-team/backend build
+```
+Expected: exits 0.
+
+- [ ] **Step 3: Rerun the Chunk 2 HTTP/metrics smoke test (values still 0 but now computed)**
+
+```bash
+cd "$(git rev-parse --show-toplevel)"
+rm -f data/atelier.db*
+node packages/backend/dist/index.js &
+SERVER_PID=$!
+for i in 1 2 3 4 5; do
+  if curl -sf http://127.0.0.1:3001/health > /dev/null; then break; fi
+  sleep 1
+done
+METRICS=$(curl -sf http://127.0.0.1:3001/metrics)
+echo "$METRICS" | grep -qE '^ws_connections\s+0'  || { echo "ws count missing"; kill $SERVER_PID 2>/dev/null; exit 1; }
+echo "$METRICS" | grep -qE '^total_turns\s+0'     || { echo "total_turns missing"; kill $SERVER_PID 2>/dev/null; exit 1; }
+echo "$METRICS" | grep -qE '^orphaned_turns\s+0'  || { echo "orphaned_turns missing"; kill $SERVER_PID 2>/dev/null; exit 1; }
+echo "metrics OK"
+kill $SERVER_PID 2>/dev/null || true
+```
+Expected: prints `metrics OK`.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add packages/backend/src/index.ts
+git commit -m "feat(backend): wire EventBus + 3 sinks into startup; live /metrics"
+```
+
+### Chunk 5 exit criteria
+
+- `pnpm -r test` passes; `MessagePersistSink` adds 6 cases.
+- Running `node packages/backend/dist/index.js` still boots, serves `/health`, `/metrics` now reports `ws_connections` and `total_turns` from live sources (both 0 until Chunk 6 brings real traffic).
+- All three sinks are constructed in `index.ts` in the order `[wsBroadcast, ringBuffer, messagePersist]`. `bus` is held as a binding but not yet consumed (consumer lands with `SessionService` / `TurnOrchestrator` in Chunk 6).
+- `subagent.*` events are explicitly no-ops in `MessagePersistSink` for MVP (documented by a TODO-style comment referencing that Chunk 7 or beyond adds nested message persistence).
+- WebSocket protocol dispatch (C2S routing) is still ping/pong only — full C2S handling lands in Chunk 6.
+
+---
+
+(Chunks 6 through 9 will be appended after Chunk 5 is reviewed and approved.)
