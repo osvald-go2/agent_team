@@ -6562,4 +6562,765 @@ git commit -m "feat(backend): add TurnOrchestrator driving AgentRunner end-to-en
 
 ---
 
-(Chunks 9 through 11 will be appended after Chunk 8 is reviewed and approved.)
+## Chunk 9: ws/connection + C2S Dispatch + Full Integration
+
+Goal: close the backend loop. Add a `Connection` class that represents one WebSocket and routes every C2S message to the right service; subscribe that connection's sender into `WsBroadcastSink` so every `bus.publish(...)` reaches it; replace the Chunk-2 ping/pong stub with full dispatch; refactor `index.ts` to instantiate `SessionService + TurnOrchestrator + Connection factory + bus`. Finish with a real-WebSocket integration test: open a client, `session.create`, `message.send` against a scripted `AgentRunner`, and assert the protocol arrives in order (`session.ready → turn.start → block.text.delta → message.end → turn.end`).
+
+Rollback dispatch (`session.rollback`) is stubbed with an error event ("not yet implemented") until Chunk 10 adds `RollbackService`.
+
+### Task 33: `ws/connection`
+
+**Files:**
+- Create: `packages/backend/src/ws/connection.ts`
+- Create: `packages/backend/src/ws/connection.test.ts`
+
+One `Connection` wraps one WebSocket. Responsibilities:
+- assign `connectionId` (uuid) on construction
+- parse incoming JSON, validate `{ type, payload }` shape, route to the right service
+- own `sessionId` scoping: `session.create` / `session.load` set it; subsequent events require it
+- subscribe a sender fn into `WsBroadcastSink` once `sessionId` is known; unsubscribe on close
+- call `bus.resetSeq(sessionId)` on subscription so the counter restarts per spec §5.1a
+- on `sync`: fetch ring buffer since-seq and replay
+
+Closures over external services keep the class thin.
+
+- [ ] **Step 1: Write the failing test**
+
+Create `packages/backend/src/ws/connection.test.ts`:
+
+```ts
+import { describe, expect, it, vi } from "vitest";
+import type { WSEvent, C2SMessage } from "@agent-team/shared";
+import { EventBus } from "../bus/event-bus.js";
+import { RingBufferSink } from "../bus/ring-buffer-sink.js";
+import { WsBroadcastSink } from "../bus/ws-broadcast-sink.js";
+import { Connection, type ConnectionDeps } from "./connection.js";
+
+const makeDeps = () => {
+  const wsBroadcast = new WsBroadcastSink();
+  const ringBuffer = new RingBufferSink({ capacity: 500 });
+  const bus = new EventBus([wsBroadcast, ringBuffer]);
+
+  const sessionService = {
+    create: vi.fn(async () => ({ sessionId: "s1" })),
+    load: vi.fn(async () => {}),
+    list: vi.fn(() => []),
+    listTurns: vi.fn(() => []),
+    getActive: vi.fn(() => null as string | null),
+    setActive: vi.fn(),
+    clearActive: vi.fn(),
+  };
+  const turnOrch = {
+    run: vi.fn(async () => {}),
+    cancel: vi.fn(async () => {}),
+    respondAskUser: vi.fn(),
+    respondPermission: vi.fn(),
+  };
+  const rollback = { rollbackTo: vi.fn(async () => {}) };
+
+  return {
+    deps: {
+      bus,
+      wsBroadcast,
+      ringBuffer,
+      sessionService,
+      turnOrch,
+      rollback,
+    } as unknown as ConnectionDeps,
+    mocks: { sessionService, turnOrch, rollback, wsBroadcast, ringBuffer, bus },
+  };
+};
+
+const makeSender = () => {
+  const sent: WSEvent[] = [];
+  return {
+    sent,
+    send: (raw: string) => sent.push(JSON.parse(raw) as WSEvent),
+  };
+};
+
+describe("Connection", () => {
+  it("routes session.create to SessionService.create and subscribes to WsBroadcastSink", async () => {
+    const { deps, mocks } = makeDeps();
+    const s = makeSender();
+    const conn = new Connection({ ...deps, send: s.send });
+    await conn.handleMessage({
+      type: "session.create",
+      payload: { agent: "claude" },
+    } as C2SMessage);
+    expect(mocks.sessionService.create).toHaveBeenCalled();
+    expect(mocks.wsBroadcast.connectionCount()).toBe(1);
+  });
+
+  it("rejects non-create messages when no session is bound to the connection", async () => {
+    const { deps } = makeDeps();
+    const s = makeSender();
+    const conn = new Connection({ ...deps, send: s.send });
+    await conn.handleMessage({ type: "message.send", payload: { text: "hi" } } as C2SMessage);
+    const err = s.sent.find((e) => e.type === "error");
+    expect(err).toBeDefined();
+  });
+
+  it("routes message.send to TurnOrchestrator.run after session is bound", async () => {
+    const { deps, mocks } = makeDeps();
+    const s = makeSender();
+    const conn = new Connection({ ...deps, send: s.send });
+    await conn.handleMessage({
+      type: "session.create",
+      payload: { agent: "claude" },
+    } as C2SMessage);
+    await conn.handleMessage({
+      type: "message.send",
+      payload: { text: "hi" },
+    } as C2SMessage);
+    expect(mocks.turnOrch.run).toHaveBeenCalledWith(
+      expect.objectContaining({ sessionId: "s1", userText: "hi" }),
+    );
+  });
+
+  it("surfaces TurnOrchestrator.run rejection as an error event", async () => {
+    const { deps, mocks } = makeDeps();
+    (mocks.turnOrch.run as unknown as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+      new Error("turn.already_running"),
+    );
+    const s = makeSender();
+    const conn = new Connection({ ...deps, send: s.send });
+    await conn.handleMessage({
+      type: "session.create",
+      payload: { agent: "claude" },
+    } as C2SMessage);
+    await conn.handleMessage({
+      type: "message.send",
+      payload: { text: "hi" },
+    } as C2SMessage);
+    const errs = s.sent.filter((e) => e.type === "error");
+    expect(errs.at(-1)).toMatchObject({
+      payload: { code: "turn.already_running" },
+    });
+  });
+
+  it("replays ring-buffer events on sync", async () => {
+    const { deps, mocks } = makeDeps();
+    const s = makeSender();
+    const conn = new Connection({ ...deps, send: s.send });
+    await conn.handleMessage({
+      type: "session.create",
+      payload: { agent: "claude" },
+    } as C2SMessage);
+    // Publish two events that end up in the ring buffer.
+    mocks.bus.publish(
+      { type: "heartbeat", payload: {} },
+      { sessionId: "s1" },
+    ); // not buffered
+    mocks.bus.publish(
+      { type: "error", payload: { code: "internal", message: "x", retriable: false } },
+      { sessionId: "s1" },
+    );
+    mocks.bus.publish(
+      { type: "error", payload: { code: "internal", message: "y", retriable: false } },
+      { sessionId: "s1" },
+    );
+    s.sent.length = 0; // clear recording
+    await conn.handleMessage({
+      type: "sync",
+      payload: { sessionId: "s1", sinceSeq: 1 },
+    } as C2SMessage);
+    // At minimum the second error should be replayed.
+    expect(s.sent.filter((e) => e.type === "error").length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("unsubscribes from WsBroadcastSink on close", async () => {
+    const { deps, mocks } = makeDeps();
+    const s = makeSender();
+    const conn = new Connection({ ...deps, send: s.send });
+    await conn.handleMessage({
+      type: "session.create",
+      payload: { agent: "claude" },
+    } as C2SMessage);
+    expect(mocks.wsBroadcast.connectionCount()).toBe(1);
+    conn.close();
+    expect(mocks.wsBroadcast.connectionCount()).toBe(0);
+  });
+});
+```
+
+- [ ] **Step 2: Run and confirm it fails**
+
+```bash
+pnpm --filter @agent-team/backend test
+```
+Expected: FAIL — `./connection.js` does not exist.
+
+- [ ] **Step 3: Implement `packages/backend/src/ws/connection.ts`**
+
+```ts
+import { randomUUID } from "node:crypto";
+import type { C2SMessage, ErrorCode, WSEvent } from "@agent-team/shared";
+import type { EventBus } from "../bus/event-bus.js";
+import type { RingBufferSink } from "../bus/ring-buffer-sink.js";
+import type { WsBroadcastSink } from "../bus/ws-broadcast-sink.js";
+
+export type SessionServiceLike = {
+  create(input: {
+    agent: "claude" | "codex";
+    model: string;
+    systemPrompt: string | null;
+    title: string;
+  }): Promise<{ sessionId: string }>;
+  load(sessionId: string): Promise<void>;
+  list(): ReturnType<() => unknown>;
+  listTurns(sessionId: string): unknown;
+  getActive(): string | null;
+  setActive(sessionId: string): void;
+  clearActive(): void;
+};
+
+export type TurnOrchestratorLike = {
+  run(input: { sessionId: string; userText: string; clientTurnId?: string }): Promise<void>;
+  cancel(turnId: string): Promise<void>;
+  respondAskUser(sessionId: string, requestId: string, answers: unknown[]): void;
+  respondPermission(
+    sessionId: string,
+    requestId: string,
+    decision: "allow_once" | "allow_always" | "deny",
+  ): void;
+};
+
+export type RollbackServiceLike = {
+  rollbackTo(sessionId: string, toTurnId: string): Promise<void>;
+};
+
+export type ConnectionDeps = {
+  bus: EventBus;
+  wsBroadcast: WsBroadcastSink;
+  ringBuffer: RingBufferSink;
+  sessionService: SessionServiceLike;
+  turnOrch: TurnOrchestratorLike;
+  rollback?: RollbackServiceLike;   // wired in Chunk 10
+  send: (raw: string) => void;
+};
+
+const DEFAULT_TITLE = "New Session";
+const DEFAULT_MODEL = "claude-sonnet-4-6";
+
+export class Connection {
+  public readonly id = randomUUID();
+  private sessionId: string | null = null;
+
+  constructor(private readonly deps: ConnectionDeps) {}
+
+  async handleMessage(msg: C2SMessage): Promise<void> {
+    try {
+      switch (msg.type) {
+        case "session.create": return this.onSessionCreate(msg);
+        case "session.load":   return this.onSessionLoad(msg);
+        case "session.list":   return this.onSessionList();
+        case "turn.list":      return this.onTurnList(msg);
+        case "session.rollback": return this.onSessionRollback(msg);
+        case "message.send":   return this.onMessageSend(msg);
+        case "turn.cancel":    return this.onTurnCancel(msg);
+        case "askuser.respond":    return this.onAskUserRespond(msg);
+        case "permission.respond": return this.onPermissionRespond(msg);
+        case "sync":           return this.onSync(msg);
+        default: {
+          const _exhaustive: never = msg;
+          void _exhaustive;
+        }
+      }
+    } catch (err) {
+      this.emitError("internal", String(err));
+    }
+  }
+
+  close(): void {
+    this.deps.wsBroadcast.unsubscribe(this.id);
+  }
+
+  private bindAndSubscribe(sessionId: string): void {
+    this.sessionId = sessionId;
+    this.deps.bus.resetSeq(sessionId);
+    this.deps.wsBroadcast.subscribe(sessionId, this.id, (ev) => {
+      this.deps.send(JSON.stringify(ev));
+    });
+  }
+
+  private async onSessionCreate(msg: Extract<C2SMessage, { type: "session.create" }>): Promise<void> {
+    const { sessionId } = await this.deps.sessionService.create({
+      agent: msg.payload.agent,
+      model: msg.payload.model ?? DEFAULT_MODEL,
+      systemPrompt: msg.payload.systemPrompt ?? null,
+      title: DEFAULT_TITLE,
+    });
+    this.bindAndSubscribe(sessionId);
+  }
+
+  private async onSessionLoad(msg: Extract<C2SMessage, { type: "session.load" }>): Promise<void> {
+    this.bindAndSubscribe(msg.payload.sessionId);
+    await this.deps.sessionService.load(msg.payload.sessionId);
+  }
+
+  private onSessionList(): void {
+    const sessions = this.deps.sessionService.list() as import("@agent-team/shared").SessionSummary[];
+    this.directSend({ type: "session.list.result", payload: { sessions } });
+  }
+
+  private onTurnList(msg: Extract<C2SMessage, { type: "turn.list" }>): void {
+    const turns = this.deps.sessionService.listTurns(msg.payload.sessionId) as
+      import("@agent-team/shared").TurnSummary[];
+    this.directSend({ type: "turn.list.result", payload: { sessionId: msg.payload.sessionId, turns } });
+  }
+
+  private async onSessionRollback(msg: Extract<C2SMessage, { type: "session.rollback" }>): Promise<void> {
+    if (!this.deps.rollback) {
+      this.emitError("internal", "rollback not yet available (Chunk 10)");
+      return;
+    }
+    try {
+      await this.deps.rollback.rollbackTo(msg.payload.sessionId, msg.payload.toTurnId);
+    } catch (err) {
+      this.emitError(coerceRollbackError(err), String(err));
+    }
+  }
+
+  private async onMessageSend(msg: Extract<C2SMessage, { type: "message.send" }>): Promise<void> {
+    if (!this.sessionId) {
+      this.emitError("session.not_found", "no session bound to this connection");
+      return;
+    }
+    try {
+      await this.deps.turnOrch.run({
+        sessionId: this.sessionId,
+        userText: msg.payload.text,
+        ...(msg.payload.clientTurnId ? { clientTurnId: msg.payload.clientTurnId } : {}),
+      });
+    } catch (err) {
+      const code = String(err).includes("turn.already_running")
+        ? "turn.already_running"
+        : "internal";
+      this.emitError(code, String(err));
+    }
+  }
+
+  private async onTurnCancel(msg: Extract<C2SMessage, { type: "turn.cancel" }>): Promise<void> {
+    await this.deps.turnOrch.cancel(msg.payload.turnId);
+  }
+
+  private onAskUserRespond(
+    msg: Extract<C2SMessage, { type: "askuser.respond" }>,
+  ): void {
+    if (!this.sessionId) return;
+    this.deps.turnOrch.respondAskUser(
+      this.sessionId,
+      msg.payload.requestId,
+      msg.payload.answers,
+    );
+  }
+
+  private onPermissionRespond(
+    msg: Extract<C2SMessage, { type: "permission.respond" }>,
+  ): void {
+    if (!this.sessionId) return;
+    this.deps.turnOrch.respondPermission(
+      this.sessionId,
+      msg.payload.requestId,
+      msg.payload.decision,
+    );
+  }
+
+  private onSync(msg: Extract<C2SMessage, { type: "sync" }>): void {
+    const events = this.deps.ringBuffer.replaySince(msg.payload.sessionId, msg.payload.sinceSeq);
+    for (const ev of events) this.directSend(ev);
+  }
+
+  // Bypasses the bus — used for direct replies to a single client (lists,
+  // ring-buffer replays, session-not-found errors when no session is bound).
+  private directSend(ev: { type: string; payload: unknown } | WSEvent): void {
+    const full: WSEvent = "seq" in ev && "ts" in ev
+      ? (ev as WSEvent)
+      : ({ ...(ev as { type: string; payload: unknown }), seq: 0, ts: Date.now() } as WSEvent);
+    this.deps.send(JSON.stringify(full));
+  }
+
+  private emitError(code: ErrorCode, message: string): void {
+    this.directSend({
+      type: "error",
+      payload: { code, message, retriable: false },
+    });
+  }
+}
+
+function coerceRollbackError(err: unknown): ErrorCode {
+  const m = String(err);
+  if (m.includes("rollback.target_not_found")) return "rollback.target_not_found";
+  if (m.includes("rollback.invalid_target")) return "rollback.invalid_target";
+  if (m.includes("rollback.workspace_conflict")) return "rollback.workspace_conflict";
+  if (m.includes("rollback.busy")) return "rollback.busy";
+  return "internal";
+}
+```
+
+- [ ] **Step 4: Run and confirm it passes**
+
+```bash
+pnpm --filter @agent-team/backend test
+```
+Expected: PASS — all 6 connection cases green.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add packages/backend/src/ws/connection.ts packages/backend/src/ws/connection.test.ts
+git commit -m "feat(backend): add Connection with full C2S dispatch"
+```
+
+### Task 34: Refactor `ws/server.ts` to use `Connection` + write a full integration test
+
+**Files:**
+- Modify: `packages/backend/src/ws/server.ts`
+- Create: `packages/backend/src/ws/integration.test.ts`
+
+- [ ] **Step 1: Replace `packages/backend/src/ws/server.ts`**
+
+```ts
+import type { Server as HttpServer } from "node:http";
+import WebSocket, { WebSocketServer } from "ws";
+import type { C2SMessage } from "@agent-team/shared";
+import type { Logger } from "../logger.js";
+import { Connection, type ConnectionDeps } from "./connection.js";
+
+export type WsServerOptions = {
+  httpServer: HttpServer;
+  path: string;
+  logger: Logger;
+  makeConnection: (send: (raw: string) => void) => Connection;
+};
+
+export type WsServerHandle = {
+  wss: WebSocketServer;
+  close: () => void;
+};
+
+export function attachWsServer(opts: WsServerOptions): WsServerHandle {
+  const { httpServer, path, logger, makeConnection } = opts;
+  const wss = new WebSocketServer({ server: httpServer, path });
+
+  wss.on("connection", (socket) => {
+    const conn = makeConnection((raw) => socket.send(raw));
+    logger.info({ connectionId: conn.id }, "ws connection opened");
+
+    socket.on("message", (raw) => {
+      const text = raw.toString("utf8");
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(text);
+      } catch {
+        logger.warn({ text }, "ws: malformed json dropped");
+        return;
+      }
+      if (!parsed || typeof parsed !== "object" || !("type" in parsed)) {
+        logger.warn({ parsed }, "ws: not a C2S envelope");
+        return;
+      }
+      void conn.handleMessage(parsed as C2SMessage);
+    });
+
+    socket.on("close", () => {
+      conn.close();
+      logger.info({ connectionId: conn.id }, "ws connection closed");
+    });
+
+    socket.on("error", (err) => {
+      logger.warn({ err, connectionId: conn.id }, "ws socket error");
+    });
+  });
+
+  return {
+    wss,
+    close: () => {
+      for (const client of wss.clients) {
+        if (client.readyState === WebSocket.OPEN) client.terminate();
+      }
+      wss.close();
+    },
+  };
+}
+
+export type { ConnectionDeps };
+```
+
+- [ ] **Step 2: Write the failing integration test**
+
+Create `packages/backend/src/ws/integration.test.ts`:
+
+```ts
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import type { AddressInfo } from "node:net";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import WebSocket from "ws";
+import type { C2SMessage, WSEvent } from "@agent-team/shared";
+import type { AgentEvent, AgentRunner, StartTurnInput, TurnResponder } from "../agent/runner.js";
+import { EventBus } from "../bus/event-bus.js";
+import { MessagePersistSink } from "../bus/message-persist-sink.js";
+import { RingBufferSink } from "../bus/ring-buffer-sink.js";
+import { WsBroadcastSink } from "../bus/ws-broadcast-sink.js";
+import { openDb, type Db } from "../db/connection.js";
+import { Repository } from "../db/repository.js";
+import { createHttpServer, type HttpServerHandle } from "../http/server.js";
+import { createLogger } from "../logger.js";
+import { SessionMutex } from "../session/mutex.js";
+import { SessionService } from "../session/session-service.js";
+import { TurnOrchestrator } from "../session/turn-orchestrator.js";
+import { GitSnapshot } from "../workspace/git-snapshot.js";
+import { WorkspaceManager } from "../workspace/workspace-manager.js";
+import { Connection } from "./connection.js";
+import { attachWsServer, type WsServerHandle } from "./server.js";
+
+class ScriptedRunner implements AgentRunner {
+  constructor(private readonly script: AgentEvent[]) {}
+  async *startTurn(_: StartTurnInput, _r: TurnResponder) {
+    for (const e of this.script) yield e;
+  }
+  cancel = async () => {};
+  resume = async (_s: string, p: string | null) => {
+    if (!p) throw new Error("replayHistory");
+    return { providerSessionId: p };
+  };
+}
+
+const log = createLogger("fatal");
+
+const send = (ws: WebSocket, msg: C2SMessage) =>
+  ws.send(JSON.stringify(msg));
+
+const recvN = (ws: WebSocket, n: number): Promise<WSEvent[]> =>
+  new Promise((resolve, reject) => {
+    const out: WSEvent[] = [];
+    const onMessage = (data: WebSocket.RawData) => {
+      out.push(JSON.parse(data.toString("utf8")) as WSEvent);
+      if (out.length >= n) {
+        ws.off("message", onMessage);
+        resolve(out);
+      }
+    };
+    ws.on("message", onMessage);
+    ws.once("error", reject);
+  });
+
+describe("ws integration — end-to-end happy path", () => {
+  let wsRoot: string;
+  let db: Db;
+  let http: HttpServerHandle;
+  let wss: WsServerHandle;
+  let url: string;
+
+  beforeEach(async () => {
+    wsRoot = mkdtempSync(join(tmpdir(), "atelier-e2e-"));
+    db = openDb(":memory:");
+    const repo = new Repository(db);
+    const workspaceMgr = new WorkspaceManager(wsRoot);
+    const git = new GitSnapshot();
+
+    const wsBroadcast = new WsBroadcastSink();
+    const ringBuffer = new RingBufferSink({ capacity: 500 });
+    const messagePersist = new MessagePersistSink(repo);
+    const bus = new EventBus([wsBroadcast, ringBuffer, messagePersist]);
+
+    const sessionService = new SessionService({ repo, workspaceMgr, git, bus });
+    const mutex = new SessionMutex();
+    const runner = new ScriptedRunner([
+      { kind: "message_start", messageId: "ma" },
+      { kind: "text_delta", messageId: "ma", blockIdx: 0, text: "Hello" },
+      { kind: "message_end", messageId: "ma" },
+      { kind: "turn_end", stopReason: "end_turn", providerSessionId: "ses_1" },
+    ]);
+    const turnOrch = new TurnOrchestrator({ repo, workspaceMgr, git, bus, runner, mutex });
+
+    http = await createHttpServer({ port: 0, logger: log });
+    wss = attachWsServer({
+      httpServer: http.server,
+      path: "/ws",
+      logger: log,
+      makeConnection: (sendFn) =>
+        new Connection({
+          bus,
+          wsBroadcast,
+          ringBuffer,
+          sessionService,
+          turnOrch,
+          send: sendFn,
+        }),
+    });
+    const addr = http.server.address() as AddressInfo;
+    url = `ws://127.0.0.1:${addr.port}/ws`;
+  });
+
+  afterEach(async () => {
+    wss.close();
+    await http.close();
+    rmSync(wsRoot, { recursive: true, force: true });
+  });
+
+  it("session.create → message.send streams through turn.start/block.text.delta/turn.end", async () => {
+    const client = new WebSocket(url);
+    await new Promise<void>((resolve) => client.once("open", () => resolve()));
+
+    const readyP = recvN(client, 1);
+    send(client, { type: "session.create", payload: { agent: "claude" } });
+    const [ready] = await readyP;
+    expect(ready!.type).toBe("session.ready");
+    const sessionId = (ready as WSEvent & { payload: { sessionId: string } }).payload.sessionId;
+    expect(typeof sessionId).toBe("string");
+
+    const eventsP = recvN(client, 5);
+    send(client, { type: "message.send", payload: { text: "hi" } });
+    const events = await eventsP;
+
+    const types = events.map((e) => e.type);
+    expect(types).toContain("turn.start");
+    expect(types).toContain("block.text.delta");
+    expect(types).toContain("turn.end");
+
+    client.close();
+  });
+});
+```
+
+- [ ] **Step 3: Run and confirm it passes**
+
+```bash
+pnpm --filter @agent-team/backend test
+```
+Expected: PASS — all integration + earlier suites green.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add packages/backend/src/ws/server.ts \
+        packages/backend/src/ws/integration.test.ts
+git commit -m "feat(backend): wire Connection into ws/server + e2e integration test"
+```
+
+### Task 35: Update `index.ts` to assemble SessionService + TurnOrchestrator + Connection
+
+**Files:**
+- Modify: `packages/backend/src/index.ts`
+
+- [ ] **Step 1: Replace `packages/backend/src/index.ts`**
+
+```ts
+import { mkdirSync } from "node:fs";
+import { dirname } from "node:path";
+import { EventBus } from "./bus/event-bus.js";
+import { MessagePersistSink } from "./bus/message-persist-sink.js";
+import { RingBufferSink } from "./bus/ring-buffer-sink.js";
+import { WsBroadcastSink } from "./bus/ws-broadcast-sink.js";
+import { loadConfig } from "./config.js";
+import { openDb } from "./db/connection.js";
+import { Repository } from "./db/repository.js";
+import { createHttpServer, type MetricsSource } from "./http/server.js";
+import { createLogger } from "./logger.js";
+import { SessionMutex } from "./session/mutex.js";
+import { SessionService } from "./session/session-service.js";
+import { TurnOrchestrator } from "./session/turn-orchestrator.js";
+import { ClaudeAgentRunner } from "./agent/claude/runner.js";
+import { ClaudeSdkSource } from "./agent/claude/sources/sdk-source.js";
+import { GitSnapshot } from "./workspace/git-snapshot.js";
+import { WorkspaceManager } from "./workspace/workspace-manager.js";
+import { Connection } from "./ws/connection.js";
+import { attachWsServer } from "./ws/server.js";
+
+async function main(): Promise<void> {
+  const config = loadConfig();
+  const logger = createLogger(config.logLevel);
+
+  mkdirSync(dirname(config.dbPath), { recursive: true });
+  mkdirSync(config.workspaceRoot, { recursive: true });
+
+  const db = openDb(config.dbPath);
+  const repo = new Repository(db);
+  const workspaceMgr = new WorkspaceManager(config.workspaceRoot);
+  const git = new GitSnapshot();
+
+  const wsBroadcast = new WsBroadcastSink({
+    onSenderError: (err, connectionId) =>
+      logger.warn({ connectionId, err }, "ws send failed"),
+  });
+  const ringBuffer = new RingBufferSink({ capacity: 500 });
+  const messagePersist = new MessagePersistSink(repo);
+  const bus = new EventBus([wsBroadcast, ringBuffer, messagePersist], {
+    onSinkError: (err, sinkIndex) => logger.error({ sinkIndex, err }, "event sink threw"),
+  });
+
+  const sessionService = new SessionService({ repo, workspaceMgr, git, bus });
+  const mutex = new SessionMutex();
+  const source = new ClaudeSdkSource({ anthropicApiKey: config.anthropicApiKey });
+  const runner = new ClaudeAgentRunner(source);
+  const turnOrch = new TurnOrchestrator({
+    repo,
+    workspaceMgr,
+    git,
+    bus,
+    runner,
+    mutex,
+  });
+
+  const metrics: MetricsSource = {
+    activeSessions: () => (sessionService.getActive() ? 1 : 0),
+    wsConnections: () => wsBroadcast.connectionCount(),
+    totalTurns: () => (db.prepare("SELECT COUNT(*) AS c FROM turns").get() as { c: number }).c,
+    orphanedTurns: () =>
+      (db.prepare("SELECT COUNT(*) AS c FROM turns WHERE status='orphaned'").get() as { c: number }).c,
+  };
+
+  const http = await createHttpServer({ port: config.port, logger, metrics });
+  attachWsServer({
+    httpServer: http.server,
+    path: "/ws",
+    logger,
+    makeConnection: (send) =>
+      new Connection({ bus, wsBroadcast, ringBuffer, sessionService, turnOrch, send }),
+  });
+
+  const shutdown = async (signal: string) => {
+    logger.info({ signal }, "shutting down");
+    await http.close();
+    db.close();
+    process.exit(0);
+  };
+  process.on("SIGINT", () => shutdown("SIGINT"));
+  process.on("SIGTERM", () => shutdown("SIGTERM"));
+}
+
+main().catch((err) => {
+  // eslint-disable-next-line no-console
+  console.error(err);
+  process.exit(1);
+});
+```
+
+- [ ] **Step 2: Build**
+
+```bash
+pnpm --filter @agent-team/backend build
+```
+Expected: exits 0.
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add packages/backend/src/index.ts
+git commit -m "feat(backend): assemble SessionService + TurnOrchestrator + Connection"
+```
+
+### Chunk 9 exit criteria
+
+- `pnpm -r test` passes, including `Connection` unit tests (6 cases) and the ws integration test (1 case) that runs a real WebSocket client through the full stack against a `ScriptedRunner`.
+- `Connection` handles all 10 C2S message types (`session.create / load / list`, `session.rollback` (stub errors), `turn.list / cancel`, `message.send`, `askuser.respond`, `permission.respond`, `sync`) with exhaustive switch + `never` guard.
+- `index.ts` now constructs all services, wires the bus, and exposes `metrics.activeSessions()` reflecting `sessionService.getActive()`.
+- Running `node packages/backend/dist/index.js` with a dummy `ANTHROPIC_API_KEY` boots without crashing; opening a WebSocket client to `/ws`, sending `session.create` + `message.send` against a real SDK would attempt to call Anthropic (expected to fail with auth error from the provider). Full-stack happy path is only exercised via Playwright in Chunk 11.
+
+---
+
+(Chunks 10 through 11 will be appended after Chunk 9 is reviewed and approved.)
