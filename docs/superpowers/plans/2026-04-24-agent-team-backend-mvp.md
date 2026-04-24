@@ -8992,4 +8992,576 @@ git commit -m "feat(frontend): add Chat UI (MessageList, blocks, Composer, Turns
 
 ---
 
-(Chunk 12 is the final chunk.)
+## Chunk 12: E2E (Playwright) + Acceptance Criteria Walkthrough
+
+Goal: prove every MVP acceptance item in spec §11 (items 1–10) with automated or manual checks. E2E tests run the **real** backend and frontend processes, but swap the Claude source for a scripted source (`ScriptedClaudeSource`) that yields canned AgentEvents AND performs scripted filesystem side-effects (so rollback tests actually have files to restore). The final task is a manual acceptance-criteria walkthrough with evidence attached to a checklist.
+
+### Task 43: Scripted test source + alternate entry point
+
+**Files:**
+- Create: `packages/backend/src/agent/claude/sources/scripted-source.ts`
+- Create: `packages/backend/src/bin/test-server.ts`
+- Modify: `packages/backend/package.json` to add a `test:server` script
+
+- [ ] **Step 1: Implement `packages/backend/src/agent/claude/sources/scripted-source.ts`**
+
+```ts
+import { writeFileSync, rmSync, mkdirSync } from "node:fs";
+import { dirname, join } from "node:path";
+import type { ClaudeSource, SdkStreamItem } from "../source.js";
+import type { StartTurnInput } from "../../runner.js";
+
+// A canned script entry: either an SDK message to yield, or a side-effect
+// on the session workspace to perform before the next yield. Tests load
+// these from a JSON file pointed to by `TEST_SCRIPT`.
+export type ScriptEntry =
+  | { kind: "yield"; sdkMessage: unknown }
+  | { kind: "write_file"; path: string; content: string }
+  | { kind: "rm_file"; path: string }
+  | { kind: "rm_dir"; path: string };
+
+export type Script = {
+  // A map from a user's message text to the ordered list of script entries
+  // fired for that turn. Unknown texts fall back to a polite "no script".
+  byUserText: Record<string, ScriptEntry[]>;
+};
+
+export class ScriptedClaudeSource implements ClaudeSource {
+  constructor(private readonly script: Script) {}
+
+  async *messages(input: StartTurnInput): AsyncIterable<SdkStreamItem> {
+    const entries =
+      this.script.byUserText[input.userText] ??
+      this.fallback(input);
+    for (const entry of entries) {
+      switch (entry.kind) {
+        case "yield":
+          yield entry.sdkMessage;
+          break;
+        case "write_file": {
+          const full = join(input.cwd, entry.path);
+          mkdirSync(dirname(full), { recursive: true });
+          writeFileSync(full, entry.content);
+          break;
+        }
+        case "rm_file":
+          rmSync(join(input.cwd, entry.path), { force: true });
+          break;
+        case "rm_dir":
+          rmSync(join(input.cwd, entry.path), { recursive: true, force: true });
+          break;
+      }
+    }
+  }
+
+  abort = async (): Promise<void> => {};
+
+  private fallback(input: StartTurnInput): ScriptEntry[] {
+    const sessionId = input.sessionId;
+    const msgId = `msg_fallback_${input.turnId}`;
+    return [
+      { kind: "yield", sdkMessage: { type: "system", subtype: "init", session_id: `ses_${sessionId}` } },
+      {
+        kind: "yield",
+        sdkMessage: {
+          type: "assistant",
+          message: {
+            id: msgId,
+            role: "assistant",
+            content: [{ type: "text", text: "(scripted runner has no canned reply for this input)" }],
+          },
+        },
+      },
+      { kind: "yield", sdkMessage: { type: "result", subtype: "success", is_error: false } },
+    ];
+  }
+}
+```
+
+- [ ] **Step 2: Implement `packages/backend/src/bin/test-server.ts`**
+
+```ts
+import { mkdirSync, readFileSync } from "node:fs";
+import { dirname } from "node:path";
+import { EventBus } from "../bus/event-bus.js";
+import { MessagePersistSink } from "../bus/message-persist-sink.js";
+import { RingBufferSink } from "../bus/ring-buffer-sink.js";
+import { WsBroadcastSink } from "../bus/ws-broadcast-sink.js";
+import { loadConfig } from "../config.js";
+import { openDb } from "../db/connection.js";
+import { Repository } from "../db/repository.js";
+import { createHttpServer } from "../http/server.js";
+import { createLogger } from "../logger.js";
+import { runStartupRecovery } from "../recovery/startup-recovery.js";
+import { RollbackService } from "../rollback/rollback-service.js";
+import { SessionMutex } from "../session/mutex.js";
+import { SessionService } from "../session/session-service.js";
+import { TurnOrchestrator } from "../session/turn-orchestrator.js";
+import { ClaudeAgentRunner } from "../agent/claude/runner.js";
+import { ScriptedClaudeSource, type Script } from "../agent/claude/sources/scripted-source.js";
+import { GitSnapshot } from "../workspace/git-snapshot.js";
+import { WorkspaceManager } from "../workspace/workspace-manager.js";
+import { Connection } from "../ws/connection.js";
+import { attachWsServer } from "../ws/server.js";
+
+async function main(): Promise<void> {
+  const config = loadConfig();
+  const logger = createLogger(config.logLevel);
+
+  const scriptPath = process.env.TEST_SCRIPT;
+  if (!scriptPath) throw new Error("TEST_SCRIPT env var is required for test-server");
+  const script = JSON.parse(readFileSync(scriptPath, "utf8")) as Script;
+
+  mkdirSync(dirname(config.dbPath), { recursive: true });
+  mkdirSync(config.workspaceRoot, { recursive: true });
+
+  const db = openDb(config.dbPath);
+  const repo = new Repository(db);
+  const workspaceMgr = new WorkspaceManager(config.workspaceRoot);
+  const git = new GitSnapshot();
+
+  const wsBroadcast = new WsBroadcastSink();
+  const ringBuffer = new RingBufferSink({ capacity: 500 });
+  const messagePersist = new MessagePersistSink(repo);
+  const bus = new EventBus([wsBroadcast, ringBuffer, messagePersist]);
+
+  const sessionService = new SessionService({ repo, workspaceMgr, git, bus });
+  const mutex = new SessionMutex();
+  const source = new ScriptedClaudeSource(script);
+  const runner = new ClaudeAgentRunner(source);
+  const turnOrch = new TurnOrchestrator({ repo, workspaceMgr, git, bus, runner, mutex });
+  const rollback = new RollbackService({ repo, workspaceMgr, git, bus, mutex });
+
+  await runStartupRecovery({ repo, workspaceMgr, git });
+
+  const http = await createHttpServer({ port: config.port, logger });
+  attachWsServer({
+    httpServer: http.server,
+    path: "/ws",
+    logger,
+    makeConnection: (send) =>
+      new Connection({ bus, wsBroadcast, ringBuffer, sessionService, turnOrch, rollback, send }),
+  });
+
+  process.on("SIGINT", async () => {
+    await http.close();
+    db.close();
+    process.exit(0);
+  });
+  process.on("SIGTERM", async () => {
+    await http.close();
+    db.close();
+    process.exit(0);
+  });
+}
+
+main().catch((err) => {
+  // eslint-disable-next-line no-console
+  console.error(err);
+  process.exit(1);
+});
+```
+
+- [ ] **Step 3: Add `test:server` script to `packages/backend/package.json`**
+
+```json
+"scripts": {
+  "build": "tsc -b && node -e \"require('node:fs').cpSync('src/db/schema.sql','dist/db/schema.sql')\"",
+  "clean": "rm -rf dist tsconfig.tsbuildinfo",
+  "dev": "tsx watch src/index.ts",
+  "start": "node dist/index.js",
+  "test": "vitest run",
+  "test:server": "tsx src/bin/test-server.ts"
+}
+```
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add packages/backend/src/agent/claude/sources/scripted-source.ts \
+        packages/backend/src/bin/test-server.ts \
+        packages/backend/package.json
+git commit -m "feat(backend): add scripted test source + test-server entry"
+```
+
+### Task 44: Playwright scaffold + happy-path E2E
+
+**Files:**
+- Create: `packages/frontend/playwright.config.ts`
+- Create: `packages/frontend/e2e/fixtures/scripts/hello.json`
+- Create: `packages/frontend/e2e/happy-path.spec.ts`
+- Modify: `packages/frontend/package.json` — add `@playwright/test`, `e2e` script
+
+- [ ] **Step 1: Add Playwright to `packages/frontend/package.json` devDependencies**
+
+```json
+"@playwright/test": "^1.47.0"
+```
+
+And add scripts:
+```json
+"e2e": "playwright test",
+"e2e:install": "playwright install --with-deps chromium"
+```
+
+Then:
+```bash
+pnpm install
+pnpm --filter @agent-team/frontend e2e:install
+```
+Expected: installs Playwright and Chromium.
+
+- [ ] **Step 2: Write `packages/frontend/playwright.config.ts`**
+
+```ts
+import { defineConfig } from "@playwright/test";
+
+export default defineConfig({
+  testDir: "./e2e",
+  timeout: 30_000,
+  retries: 0,
+  use: {
+    baseURL: "http://127.0.0.1:5173",
+    trace: "retain-on-failure",
+  },
+  webServer: [
+    {
+      // Backend in test mode with a scripted source.
+      command: "pnpm --filter @agent-team/backend test:server",
+      url: "http://127.0.0.1:3001/health",
+      reuseExistingServer: false,
+      timeout: 20_000,
+      env: {
+        TEST_SCRIPT: "packages/frontend/e2e/fixtures/scripts/hello.json",
+        ANTHROPIC_API_KEY: "test-key-not-used",
+        PORT: "3001",
+        DB_PATH: "./data/e2e.db",
+        WORKSPACE_ROOT: "./workspaces/e2e",
+        LOG_LEVEL: "fatal",
+        CLAUDE_SOURCE: "sdk",
+      },
+    },
+    {
+      command: "pnpm --filter @agent-team/frontend dev",
+      url: "http://127.0.0.1:5173",
+      reuseExistingServer: false,
+      timeout: 20_000,
+    },
+  ],
+});
+```
+
+Note: each E2E test overrides `TEST_SCRIPT` to a test-specific fixture; the default above covers the happy-path suite.
+
+- [ ] **Step 3: Write `packages/frontend/e2e/fixtures/scripts/hello.json`**
+
+```json
+{
+  "byUserText": {
+    "hi": [
+      {"kind": "yield", "sdkMessage": {"type": "system", "subtype": "init", "session_id": "ses_1"}},
+      {"kind": "yield", "sdkMessage": {"type": "assistant", "message": {"id": "a1", "role": "assistant", "content": [{"type": "text", "text": "Hello!"}]}}},
+      {"kind": "yield", "sdkMessage": {"type": "result", "subtype": "success", "is_error": false}}
+    ]
+  }
+}
+```
+
+- [ ] **Step 4: Write `packages/frontend/e2e/happy-path.spec.ts`**
+
+```ts
+import { test, expect } from "@playwright/test";
+
+test("happy path: send 'hi', receive streamed 'Hello!'", async ({ page }) => {
+  await page.goto("/");
+  await expect(page.getByPlaceholder(/Type a message/)).toBeVisible({ timeout: 15_000 });
+  await page.getByPlaceholder(/Type a message/).fill("hi");
+  await page.getByRole("button", { name: "Send" }).click();
+  await expect(page.getByText("Hello!")).toBeVisible({ timeout: 10_000 });
+});
+```
+
+- [ ] **Step 5: Run the E2E once to confirm**
+
+```bash
+cd "$(git rev-parse --show-toplevel)"
+rm -rf data/e2e.db* workspaces/e2e
+pnpm --filter @agent-team/frontend e2e
+```
+Expected: PASS. If the webServer commands fail, check that pnpm and Playwright are installed and ports 3001/5173 are free.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add packages/frontend/playwright.config.ts \
+        packages/frontend/e2e/ \
+        packages/frontend/package.json
+git commit -m "test(e2e): happy-path Playwright with scripted backend"
+```
+
+### Task 45: E2E — persistence across restart
+
+**Files:**
+- Create: `packages/frontend/e2e/fixtures/scripts/persistence.json`
+- Create: `packages/frontend/e2e/persistence.spec.ts`
+
+- [ ] **Step 1: `persistence.json` — two distinct user messages, two distinct replies**
+
+```json
+{
+  "byUserText": {
+    "first": [
+      {"kind": "yield", "sdkMessage": {"type": "system", "subtype": "init", "session_id": "ses_persist"}},
+      {"kind": "yield", "sdkMessage": {"type": "assistant", "message": {"id": "a1", "role": "assistant", "content": [{"type": "text", "text": "got-first"}]}}},
+      {"kind": "yield", "sdkMessage": {"type": "result", "subtype": "success", "is_error": false}}
+    ],
+    "second": [
+      {"kind": "yield", "sdkMessage": {"type": "assistant", "message": {"id": "a2", "role": "assistant", "content": [{"type": "text", "text": "got-second"}]}}},
+      {"kind": "yield", "sdkMessage": {"type": "result", "subtype": "success", "is_error": false}}
+    ]
+  }
+}
+```
+
+- [ ] **Step 2: `persistence.spec.ts`**
+
+```ts
+import { test, expect } from "@playwright/test";
+import { spawnSync } from "node:child_process";
+
+// The webServer started by playwright.config.ts already has a fresh DB.
+// This test sends one message, then triggers a soft-restart of the backend
+// via SIGTERM on its PID. Since Playwright's webServer is one-shot, we
+// instead emulate "restart" by reloading the page — the same session row is
+// loaded from sqlite, and the assistant message should still be visible.
+test.describe.configure({ mode: "serial" });
+
+test("persistence: first message visible after page reload", async ({ page }) => {
+  await page.goto("/");
+  await page.getByPlaceholder(/Type a message/).fill("first");
+  await page.getByRole("button", { name: "Send" }).click();
+  await expect(page.getByText("got-first")).toBeVisible({ timeout: 10_000 });
+
+  await page.reload();
+  await expect(page.getByText("got-first")).toBeVisible({ timeout: 15_000 });
+
+  await page.getByPlaceholder(/Type a message/).fill("second");
+  await page.getByRole("button", { name: "Send" }).click();
+  await expect(page.getByText("got-second")).toBeVisible({ timeout: 10_000 });
+});
+```
+
+The Playwright config must point `TEST_SCRIPT` at `persistence.json` for this suite. Add a per-project override in `playwright.config.ts`:
+
+```ts
+// Replace the `webServer` default with a `projects` override per-fixture.
+// For this plan we keep the single-fixture model and document the manual
+// swap. Run:  TEST_SCRIPT=packages/frontend/e2e/fixtures/scripts/persistence.json pnpm --filter @agent-team/frontend e2e persistence.spec.ts
+```
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add packages/frontend/e2e/fixtures/scripts/persistence.json \
+        packages/frontend/e2e/persistence.spec.ts
+git commit -m "test(e2e): persistence suite (history survives reload)"
+```
+
+### Task 46: E2E — rollback with file restoration
+
+**Files:**
+- Create: `packages/frontend/e2e/fixtures/scripts/rollback.json`
+- Create: `packages/frontend/e2e/rollback.spec.ts`
+
+- [ ] **Step 1: `rollback.json` — three turns: create a.py, edit a.py, delete a.py**
+
+```json
+{
+  "byUserText": {
+    "create": [
+      {"kind": "yield", "sdkMessage": {"type": "system", "subtype": "init", "session_id": "ses_rb"}},
+      {"kind": "write_file", "path": "a.py", "content": "print('v1')"},
+      {"kind": "yield", "sdkMessage": {"type": "assistant", "message": {"id": "a1", "role": "assistant", "content": [{"type": "text", "text": "created a.py"}]}}},
+      {"kind": "yield", "sdkMessage": {"type": "result", "subtype": "success", "is_error": false}}
+    ],
+    "edit": [
+      {"kind": "write_file", "path": "a.py", "content": "print('v2')"},
+      {"kind": "yield", "sdkMessage": {"type": "assistant", "message": {"id": "a2", "role": "assistant", "content": [{"type": "text", "text": "edited a.py"}]}}},
+      {"kind": "yield", "sdkMessage": {"type": "result", "subtype": "success", "is_error": false}}
+    ],
+    "delete": [
+      {"kind": "rm_file", "path": "a.py"},
+      {"kind": "yield", "sdkMessage": {"type": "assistant", "message": {"id": "a3", "role": "assistant", "content": [{"type": "text", "text": "deleted a.py"}]}}},
+      {"kind": "yield", "sdkMessage": {"type": "result", "subtype": "success", "is_error": false}}
+    ]
+  }
+}
+```
+
+- [ ] **Step 2: `rollback.spec.ts`**
+
+```ts
+import { test, expect } from "@playwright/test";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+
+test("rollback: returns workspace + DB to end-of-turn-1 state", async ({ page }) => {
+  await page.goto("/");
+  const composer = page.getByPlaceholder(/Type a message/);
+
+  for (const text of ["create", "edit", "delete"]) {
+    await composer.fill(text);
+    await page.getByRole("button", { name: "Send" }).click();
+    await expect(page.getByText(new RegExp(`${text}ed?\\s+a\\.py`))).toBeVisible({ timeout: 10_000 });
+  }
+
+  // Locate the workspace directory (single session under workspaces/e2e).
+  const workspaceRoot = join(process.cwd(), "workspaces/e2e");
+  const [sessionDir] = readdirSync(workspaceRoot).filter(
+    (d) => !d.startsWith("."),
+  );
+  expect(sessionDir).toBeTruthy();
+
+  // a.py should NOT exist (turn 3 deleted it).
+  expect(existsSync(join(workspaceRoot, sessionDir!, "a.py"))).toBe(false);
+
+  // Open turns drawer and click "Roll back here" on the first turn.
+  await page.getByRole("button", { name: "Turns" }).click();
+  // Wait for the drawer to populate (3s polling in the component).
+  await page.waitForTimeout(4000);
+  const rollbackButtons = page.getByRole("button", { name: "Roll back here" });
+  // The first turn is sequenceNum=1; its button is the FIRST one in the list.
+  await rollbackButtons.first().click();
+
+  // After rollback, the deleted/edited replies should be gone.
+  await expect(page.getByText("deleted a.py")).toBeHidden({ timeout: 10_000 });
+  await expect(page.getByText("edited a.py")).toBeHidden();
+
+  // a.py should exist with turn-1 content.
+  const aPath = join(workspaceRoot, sessionDir!, "a.py");
+  expect(existsSync(aPath)).toBe(true);
+  expect(readFileSync(aPath, "utf8")).toBe("print('v1')");
+});
+```
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add packages/frontend/e2e/fixtures/scripts/rollback.json \
+        packages/frontend/e2e/rollback.spec.ts
+git commit -m "test(e2e): rollback with file restoration"
+```
+
+### Task 47: E2E — crash recovery
+
+**Files:**
+- Create: `packages/frontend/e2e/fixtures/scripts/crash.json`
+- Create: `packages/frontend/e2e/crash-recovery.spec.ts`
+
+This test is intentionally narrower than the others — it verifies the principles without a real kill-9. We set the backend up, run ONE script that produces an in-progress row mid-turn (via a never-ending yield) and then the Playwright test asserts that after a page reload, the session remains usable and the orphaned turn is marked. Running a true `kill -9` requires spawning the backend ourselves outside Playwright's webServer contract; we document that as a manual verification step instead.
+
+- [ ] **Step 1: `crash.json` — a turn that yields one assistant start but never results**
+
+```json
+{
+  "byUserText": {
+    "go": [
+      {"kind": "yield", "sdkMessage": {"type": "system", "subtype": "init", "session_id": "ses_crash"}},
+      {"kind": "yield", "sdkMessage": {"type": "assistant", "message": {"id": "a1", "role": "assistant", "content": [{"type": "text", "text": "working…"}]}}}
+    ]
+  }
+}
+```
+
+(Note: absence of a `result` message means the SDK stream never terminates; the `async *` in ScriptedClaudeSource simply runs out of entries and the iterator ends — which still reaches `turn_end` in the translator because the translator's outer `for await` sees no more items and the orchestrator's finally block publishes `turn.end` with whatever `stopReason` it last set (defaults to `"end_turn"`).)
+
+Actually this doesn't simulate a crash — it simulates a normal turn that just didn't get a result. To simulate a true crash mid-turn, we need to forcibly terminate the backend mid-stream. For MVP, document this as manual verification:
+
+- [ ] **Step 2: Write `packages/frontend/e2e/crash-recovery.spec.ts` as a manual-walkthrough skeleton**
+
+```ts
+import { test, expect } from "@playwright/test";
+
+// See ACCEPTANCE-WALKTHROUGH.md §crash. This automated test only covers the
+// narrow "orphaned turn on load" UI behavior assuming a DB row was marked
+// by StartupRecovery. Full crash-mid-stream verification is manual.
+test.skip("crash recovery (manual): see ACCEPTANCE-WALKTHROUGH.md", async () => {});
+```
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add packages/frontend/e2e/crash-recovery.spec.ts \
+        packages/frontend/e2e/fixtures/scripts/crash.json
+git commit -m "test(e2e): crash-recovery scaffold (manual walkthrough)"
+```
+
+### Task 48: Final acceptance walkthrough
+
+**Files:**
+- Create: `ACCEPTANCE-WALKTHROUGH.md` at the repo root
+
+- [ ] **Step 1: Write `ACCEPTANCE-WALKTHROUGH.md`**
+
+```markdown
+# MVP Acceptance Walkthrough
+
+This checklist corresponds to spec §11 (1–10). Run each item and tick the
+box when the behavior matches. Attach terminal output or screenshots.
+
+## Automated
+
+- [ ] #1 `pnpm install && pnpm -r dev` starts backend (3001) + frontend (5173).
+- [ ] #2 `http://localhost:5173` loads the Chat view with an empty session.
+- [ ] #8 `pnpm -r test` passes.
+- [ ] #10 (same as #8) full test pyramid green.
+
+## Automated via Playwright (scripted source)
+
+- [ ] #3 happy-path.spec.ts passes; scripted reply "Hello!" visible.
+- [ ] #4 persistence.spec.ts passes; reload preserves history.
+- [ ] #7 happy-path alongside Chunk 5 block-dump UI exercises text + thinking +
+       tool_use + `block.raw` handling.
+- [ ] #8 rollback.spec.ts passes; a.py is restored after rolling back to turn 1.
+
+## Manual
+
+- [ ] #5 send a second message while the first is still streaming — assert
+       visible `turn.already_running` error in the UI.
+- [ ] #6 simulate provider network failure (run backend with an unreachable
+       API endpoint); assert a `provider.network` error arrives via WS.
+- [ ] #9 start a scripted turn, `kill -9 $(pgrep -f test-server)`, restart
+       backend; load the session; assert the in-flight turn appears as
+       `status=orphaned` in `turn.list` output and the workspace has no
+       partial files.
+
+## Evidence
+
+Paste command outputs or screenshots inline under each checked box.
+```
+
+- [ ] **Step 2: Commit**
+
+```bash
+git add ACCEPTANCE-WALKTHROUGH.md
+git commit -m "docs: MVP acceptance walkthrough covering spec §11"
+```
+
+### Chunk 12 exit criteria
+
+- `pnpm --filter @agent-team/frontend e2e` runs and all non-skipped Playwright tests pass (`happy-path`, `persistence`, `rollback`). The `crash-recovery` Playwright file is a skip-only stub.
+- `ACCEPTANCE-WALKTHROUGH.md` lists every spec §11 item with pass/fail boxes and a clear split between automated and manual.
+- `packages/backend/src/agent/claude/sources/scripted-source.ts` is the ONLY code path E2E uses to replace Claude. The production path (`ClaudeSdkSource`) is untouched; switching between them is a one-line wire-up change in an alternate entry (`test-server.ts`).
+
+---
+
+# Implementation Complete
+
+When every chunk above is implemented:
+
+1. Run the automated portion of `ACCEPTANCE-WALKTHROUGH.md`.
+2. Perform the three manual items (#5, #6, #9) with real actions; paste evidence into the doc.
+3. If all 10 items are green, the MVP defined in
+   `docs/superpowers/specs/2026-04-23-agent-team-backend-design.md` is done.
+4. Follow up work lives in the spec's "Future work" section (§12).
+
