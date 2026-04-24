@@ -3104,12 +3104,30 @@ export type EventContext = {
   subagentId?: string;
 };
 
-export type PublishInput = Omit<WSEvent, "seq" | "ts">;
+// DistributiveOmit preserves the discriminated-union structure of WSEvent.
+// Plain `Omit<WSEvent, "seq" | "ts">` collapses the union (because
+// `keyof (A | B | C)` is the *intersection* of keys, which discards the
+// per-variant payload shape). That would make `bus.publish(...)` callers
+// in later chunks impossible to type-check.
+type DistributiveOmit<T, K extends keyof never> = T extends unknown
+  ? Omit<T, K>
+  : never;
 
+export type PublishInput = DistributiveOmit<WSEvent, "seq" | "ts">;
+
+// Sinks MUST treat `ev.seq` and `ev.ts` as read-only. They were stamped by
+// the EventBus and are load-bearing for the sync/replay invariant. The
+// single-stamper invariant is a convention, not enforced by the type.
 export interface EventSink {
   handle(ev: WSEvent, ctx: EventContext): void;
 }
 ```
+
+**Note on spec alignment:** spec §6.4 describes seq/ts assignment as happening inside `WsBroadcastSink`. This plan deliberately refines that by centralizing stamping in `EventBus` instead. The reasons are:
+1. the RingBufferSink needs `seq` too — dual stamping adds risk of divergence;
+2. a single stamper makes the "seq is monotonic per session" invariant provable at the bus level; 
+3. sinks become pure consumers, easier to test.
+Spec §5.1a's reset-on-new-connection rule is preserved via `EventBus.resetSeq(sessionId)`, which ws/connection (Chunk 5) will call on connection open.
 
 - [ ] **Step 2: Write the failing EventBus test**
 
@@ -3286,7 +3304,7 @@ import type { WSEvent } from "@agent-team/shared";
 import { EventBus } from "./event-bus.js";
 import { RingBufferSink } from "./ring-buffer-sink.js";
 
-const evt = (seq = 0): { type: "heartbeat"; payload: Record<string, never> } => ({
+const heartbeat = (): { type: "heartbeat"; payload: Record<string, never> } => ({
   type: "heartbeat",
   payload: {},
 });
@@ -3307,9 +3325,9 @@ describe("RingBufferSink", () => {
   it("never records heartbeat events", () => {
     const sink = new RingBufferSink({ capacity: 10 });
     const bus = new EventBus([sink]);
-    bus.publish(evt(), { sessionId: "s1" });
+    bus.publish(heartbeat(), { sessionId: "s1" });
     bus.publish(noisy(), { sessionId: "s1" });
-    bus.publish(evt(), { sessionId: "s1" });
+    bus.publish(heartbeat(), { sessionId: "s1" });
     bus.publish(noisy(), { sessionId: "s1" });
     const got = sink.replaySince("s1", 0);
     expect(got.map((e) => e.type)).toEqual(["block.text.delta", "block.text.delta"]);
@@ -3509,10 +3527,19 @@ describe("WsBroadcastSink", () => {
     expect(sink.connectionCount()).toBe(2);
   });
 
-  it("publishing to a session with zero subscribers is a no-op (but EventBus still records in other sinks)", () => {
+  it("publishing to a session with zero subscribers is a no-op", () => {
     const sink = new WsBroadcastSink();
     const bus = new EventBus([sink]);
     expect(() => bus.publish(noisy(), { sessionId: "orphan" })).not.toThrow();
+  });
+
+  it("other sinks still receive when WsBroadcastSink has zero subscribers for a session", () => {
+    const sink = new WsBroadcastSink();
+    const received: WSEvent[] = [];
+    const recorder = { handle: (ev: WSEvent) => received.push(ev) };
+    const bus = new EventBus([sink, recorder]);
+    bus.publish(noisy(), { sessionId: "orphan" });
+    expect(received).toHaveLength(1);
   });
 
   it("unsubscribe is idempotent for unknown connection ids", () => {
@@ -3618,8 +3645,10 @@ git commit -m "feat(backend): add WsBroadcastSink with connection registry"
 
 - `pnpm -r test` passes; bus suites add ~20 new test cases.
 - `EventBus` is the single stamper of `seq` and `ts`; no other module assigns either field.
+- `PublishInput` compiles as a proper distributive union (`DistributiveOmit<WSEvent, "seq" | "ts">`) — construction of a typed event like `{ type: "block.text.delta", payload: { messageId, blockIdx, text } }` must type-check when passed to `bus.publish`.
 - `RingBufferSink.replaySince(sessionId, sinceSeq)` returns the correct slice or `[]` in every edge case covered by tests.
 - `WsBroadcastSink` exposes `subscribe / unsubscribe / connectionCount / handle` and is the unique path from events to WebSockets.
+- `EventBus.resetSeq` is defined and unit-tested (Task 19) but NOT yet called from anywhere; the call site lives in Chunk 5's `ws/connection`. This is expected.
 - `index.ts` is NOT yet updated to use the bus — wiring lands in Chunk 5 along with `MessagePersistSink` and `ws/connection`.
 
 ---
