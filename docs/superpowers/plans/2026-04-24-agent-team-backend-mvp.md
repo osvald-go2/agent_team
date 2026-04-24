@@ -5592,4 +5592,951 @@ git commit -m "feat(backend): add GitSnapshot wrapper (init/pre/post/reset)"
 
 ---
 
-(Chunks 8 through 9 will be appended after Chunk 7 is reviewed and approved.)
+## Chunk 8: SessionService + TurnOrchestrator
+
+Goal: finally wire the pieces into the spec's §6.2 end-to-end control flow. `SessionService` owns session lifecycle (create, load, list, listTurns) and the single active-session pointer (spec §3 non-goal: exactly one active session at a time). `TurnOrchestrator` runs one turn end-to-end: pre-turn commit → user message row → publish `turn.start` → drive `AgentRunner` → translate each `AgentEvent` to `WSEvent` (with subagent-nested inner wrapping per spec §6.1) → publish → on turn_end: capture `providerSessionId`, post-turn commit, update turn row, publish `turn.end`. The chunk exposes a single mutex (`per-session lock`) shared with `RollbackService` (Chunk 10).
+
+**ws/connection and full C2S dispatch are NOT in this chunk.** This chunk writes testable services with unit tests that drive them directly (with a FakeAgentRunner from Chunk 6 and in-memory db + tmpdir workspace). Chunk 9 stitches the WebSocket layer on top.
+
+### Task 30: Per-session mutex helper
+
+**Files:**
+- Create: `packages/backend/src/session/mutex.ts`
+- Create: `packages/backend/src/session/mutex.test.ts`
+
+- [ ] **Step 1: Write the failing test**
+
+Create `packages/backend/src/session/mutex.test.ts`:
+
+```ts
+import { describe, expect, it } from "vitest";
+import { SessionMutex } from "./mutex.js";
+
+describe("SessionMutex", () => {
+  it("runs a single critical section exclusively", async () => {
+    const m = new SessionMutex();
+    const log: string[] = [];
+    await Promise.all([
+      m.runExclusive("s1", async () => {
+        log.push("a-start");
+        await new Promise((r) => setTimeout(r, 10));
+        log.push("a-end");
+      }),
+      m.runExclusive("s1", async () => {
+        log.push("b-start");
+        log.push("b-end");
+      }),
+    ]);
+    expect(log).toEqual(["a-start", "a-end", "b-start", "b-end"]);
+  });
+
+  it("runs critical sections for different sessions in parallel", async () => {
+    const m = new SessionMutex();
+    const log: string[] = [];
+    await Promise.all([
+      m.runExclusive("a", async () => {
+        log.push("a1");
+        await new Promise((r) => setTimeout(r, 5));
+        log.push("a2");
+      }),
+      m.runExclusive("b", async () => {
+        log.push("b1");
+        await new Promise((r) => setTimeout(r, 5));
+        log.push("b2");
+      }),
+    ]);
+    // a1 and b1 both fire before either a2/b2 — any interleaving within is OK.
+    expect(log.slice(0, 2).sort()).toEqual(["a1", "b1"]);
+    expect(log.slice(2).sort()).toEqual(["a2", "b2"]);
+  });
+
+  it("releases the mutex even when the section throws", async () => {
+    const m = new SessionMutex();
+    await expect(m.runExclusive("s1", async () => { throw new Error("boom"); })).rejects.toThrow("boom");
+    // Next acquire must succeed immediately.
+    const out = await m.runExclusive("s1", async () => "ok");
+    expect(out).toBe("ok");
+  });
+
+  it("isLocked reports live lock state", async () => {
+    const m = new SessionMutex();
+    expect(m.isLocked("s1")).toBe(false);
+    const p = m.runExclusive("s1", async () => {
+      expect(m.isLocked("s1")).toBe(true);
+      await new Promise((r) => setTimeout(r, 5));
+    });
+    await p;
+    expect(m.isLocked("s1")).toBe(false);
+  });
+});
+```
+
+- [ ] **Step 2: Run and confirm it fails**
+
+```bash
+pnpm --filter @agent-team/backend test
+```
+Expected: FAIL — `./mutex.js` does not exist.
+
+- [ ] **Step 3: Implement `packages/backend/src/session/mutex.ts`**
+
+```ts
+// A per-key mutex that serializes async sections touching the same key.
+// Used by TurnOrchestrator (serializes turns per session) and by
+// RollbackService (serializes a rollback against any in-flight turn).
+export class SessionMutex {
+  private readonly chains = new Map<string, Promise<unknown>>();
+
+  isLocked(key: string): boolean {
+    return this.chains.has(key);
+  }
+
+  async runExclusive<T>(key: string, fn: () => Promise<T>): Promise<T> {
+    const prev = this.chains.get(key) ?? Promise.resolve();
+    let release: () => void = () => {};
+    const ticket = new Promise<void>((resolve) => { release = resolve; });
+    // The next caller will await `ticket`, which resolves when we finish.
+    const next = prev.then(() => ticket);
+    this.chains.set(key, next);
+    try {
+      await prev;
+      return await fn();
+    } finally {
+      release();
+      // Only clear the map entry if we're still the tail; otherwise a later
+      // acquire has already taken over.
+      if (this.chains.get(key) === next) this.chains.delete(key);
+    }
+  }
+}
+```
+
+- [ ] **Step 4: Run and confirm it passes**
+
+```bash
+pnpm --filter @agent-team/backend test
+```
+Expected: PASS — all 4 cases green.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add packages/backend/src/session/mutex.ts \
+        packages/backend/src/session/mutex.test.ts
+git commit -m "feat(backend): add per-session SessionMutex"
+```
+
+### Task 31: `SessionService`
+
+**Files:**
+- Create: `packages/backend/src/session/session-service.ts`
+- Create: `packages/backend/src/session/session-service.test.ts`
+
+Responsibilities (spec §6.2):
+- `create({ agent, model, systemPrompt?, cwd? })`: UUID, workspace dir, initial git commit, DB row, publish `session.ready`.
+- `load(sessionId)`: validate + ensure workspace + git repo exists (calling `ensureRepo` if missing, reconcileHead if latest turn's post-commit doesn't match HEAD), publish `session.ready` with existing messages.
+- `list()`: `SessionSummary[]`.
+- `listTurns(sessionId)`: `TurnSummary[]`.
+- `getActive() / setActive(id) / clearActive()` for MVP single-active-session bookkeeping.
+
+- [ ] **Step 1: Write the failing test**
+
+Create `packages/backend/src/session/session-service.test.ts`:
+
+```ts
+import { mkdtempSync, rmSync, readdirSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import type { WSEvent } from "@agent-team/shared";
+import { EventBus } from "../bus/event-bus.js";
+import type { EventSink } from "../bus/types.js";
+import { openDb, type Db } from "../db/connection.js";
+import { Repository } from "../db/repository.js";
+import { GitSnapshot } from "../workspace/git-snapshot.js";
+import { WorkspaceManager } from "../workspace/workspace-manager.js";
+import { SessionService } from "./session-service.js";
+
+class RecorderSink implements EventSink {
+  public events: WSEvent[] = [];
+  handle(ev: WSEvent) { this.events.push(ev); }
+}
+
+describe("SessionService", () => {
+  let wsRoot: string;
+  let db: Db;
+  let repo: Repository;
+  let wm: WorkspaceManager;
+  let git: GitSnapshot;
+  let sink: RecorderSink;
+  let bus: EventBus;
+  let svc: SessionService;
+
+  beforeEach(() => {
+    wsRoot = mkdtempSync(join(tmpdir(), "atelier-svc-"));
+    db = openDb(":memory:");
+    repo = new Repository(db);
+    wm = new WorkspaceManager(wsRoot);
+    git = new GitSnapshot();
+    sink = new RecorderSink();
+    bus = new EventBus([sink]);
+    svc = new SessionService({ repo, workspaceMgr: wm, git, bus });
+  });
+
+  afterEach(() => {
+    rmSync(wsRoot, { recursive: true, force: true });
+  });
+
+  it("create() materializes a workspace + git repo, inserts session, emits session.ready", async () => {
+    const { sessionId } = await svc.create({
+      agent: "claude",
+      model: "claude-sonnet-4-6",
+      systemPrompt: null,
+      title: "T1",
+    });
+    // Dir exists and is a repo
+    expect(readdirSync(wsRoot)).toContain(sessionId);
+    // DB row exists
+    expect(repo.getSession(sessionId)).not.toBeNull();
+    // Event
+    const ready = sink.events.find((e) => e.type === "session.ready");
+    expect(ready).toBeDefined();
+  });
+
+  it("list() returns summaries with message and turn counts", async () => {
+    const { sessionId } = await svc.create({ agent: "claude", model: "m", systemPrompt: null, title: "T1" });
+    const list = svc.list();
+    expect(list).toHaveLength(1);
+    expect(list[0]!.id).toBe(sessionId);
+    expect(list[0]!.messageCount).toBe(0);
+    expect(list[0]!.turnCount).toBe(0);
+  });
+
+  it("load() ensures the workspace is recreated if the directory is missing", async () => {
+    const { sessionId } = await svc.create({ agent: "claude", model: "m", systemPrompt: null, title: "T1" });
+    rmSync(join(wsRoot, sessionId), { recursive: true, force: true });
+    await svc.load(sessionId);
+    expect(readdirSync(wsRoot)).toContain(sessionId);
+  });
+
+  it("load() rejects an unknown sessionId with an error event", async () => {
+    await svc.load("nope");
+    const errs = sink.events.filter((e) => e.type === "error");
+    expect(errs).toHaveLength(1);
+    expect(errs[0]!.payload).toMatchObject({ code: "session.not_found" });
+  });
+
+  it("listTurns returns summaries ordered by sequence_num ascending", async () => {
+    const { sessionId } = await svc.create({ agent: "claude", model: "m", systemPrompt: null, title: "T1" });
+    repo.insertTurn({
+      id: "t2", sessionId, sequenceNum: 2,
+      status: "completed", preTurnCommit: "p2", firstUserText: "b", createdAt: 20,
+    });
+    repo.insertTurn({
+      id: "t1", sessionId, sequenceNum: 1,
+      status: "completed", preTurnCommit: "p1", firstUserText: "a", createdAt: 10,
+    });
+    const turns = svc.listTurns(sessionId);
+    expect(turns.map((t) => t.id)).toEqual(["t1", "t2"]);
+    expect(turns[0]!.firstUserText).toBe("a");
+  });
+
+  it("getActive / setActive / clearActive track the one-session-at-a-time pointer", async () => {
+    expect(svc.getActive()).toBeNull();
+    const { sessionId } = await svc.create({ agent: "claude", model: "m", systemPrompt: null, title: "T1" });
+    expect(svc.getActive()).toBe(sessionId);
+    svc.clearActive();
+    expect(svc.getActive()).toBeNull();
+    svc.setActive(sessionId);
+    expect(svc.getActive()).toBe(sessionId);
+  });
+});
+```
+
+- [ ] **Step 2: Run and confirm it fails**
+
+```bash
+pnpm --filter @agent-team/backend test
+```
+Expected: FAIL — `./session-service.js` does not exist.
+
+- [ ] **Step 3: Implement `packages/backend/src/session/session-service.ts`**
+
+```ts
+import { randomUUID } from "node:crypto";
+import type { Block, Message, SessionSummary, TurnSummary } from "@agent-team/shared";
+import type { EventBus } from "../bus/event-bus.js";
+import type { Repository } from "../db/repository.js";
+import type { GitSnapshot } from "../workspace/git-snapshot.js";
+import type { WorkspaceManager } from "../workspace/workspace-manager.js";
+
+export type SessionServiceDeps = {
+  repo: Repository;
+  workspaceMgr: WorkspaceManager;
+  git: GitSnapshot;
+  bus: EventBus;
+};
+
+export type CreateSessionInput = {
+  agent: "claude" | "codex";
+  model: string;
+  title: string;
+  systemPrompt: string | null;
+  cwd?: string;
+};
+
+export type CreateSessionOutput = {
+  sessionId: string;
+};
+
+export class SessionService {
+  private activeId: string | null = null;
+
+  constructor(private readonly deps: SessionServiceDeps) {}
+
+  async create(input: CreateSessionInput): Promise<CreateSessionOutput> {
+    const sessionId = randomUUID();
+    const dir = this.deps.workspaceMgr.create(sessionId);
+    await this.deps.git.initAndInitialCommit(dir);
+    const now = Date.now();
+    this.deps.repo.createSession({
+      id: sessionId,
+      title: input.title,
+      agent: input.agent,
+      model: input.model,
+      providerSessionId: null,
+      systemPrompt: input.systemPrompt,
+      cwd: dir,
+      createdAt: now,
+    });
+    this.activeId = sessionId;
+    this.deps.bus.resetSeq(sessionId);
+    this.publishSessionReady(sessionId);
+    return { sessionId };
+  }
+
+  async load(sessionId: string): Promise<void> {
+    const row = this.deps.repo.getSession(sessionId);
+    if (!row) {
+      this.deps.bus.publish(
+        {
+          type: "error",
+          payload: {
+            code: "session.not_found",
+            message: `session ${sessionId} not found`,
+            retriable: false,
+          },
+        },
+        { sessionId },
+      );
+      return;
+    }
+    this.deps.workspaceMgr.ensure(sessionId);
+    // If the workspace dir was wiped, reinit so post-turn commits have
+    // somewhere to land. initAndInitialCommit is no-op if .git already exists.
+    try {
+      await this.deps.git.verifyClean(row.cwd);
+    } catch {
+      await this.deps.git.initAndInitialCommit(row.cwd);
+    }
+    this.activeId = sessionId;
+    this.deps.bus.resetSeq(sessionId);
+    this.publishSessionReady(sessionId);
+  }
+
+  list(): SessionSummary[] {
+    return this.deps.repo.listSessions();
+  }
+
+  listTurns(sessionId: string): TurnSummary[] {
+    return this.deps.repo.listTurnsBySession(sessionId).map((t) => ({
+      id: t.id,
+      sequenceNum: t.sequenceNum,
+      status: t.status,
+      ...(t.stopReason ? { stopReason: t.stopReason } : {}),
+      firstUserText: t.firstUserText,
+      createdAt: t.createdAt,
+      ...(t.completedAt !== null ? { completedAt: t.completedAt } : {}),
+    }));
+  }
+
+  getActive(): string | null {
+    return this.activeId;
+  }
+
+  setActive(sessionId: string): void {
+    this.activeId = sessionId;
+  }
+
+  clearActive(): void {
+    this.activeId = null;
+  }
+
+  private publishSessionReady(sessionId: string): void {
+    const row = this.deps.repo.getSession(sessionId);
+    if (!row) return;
+    const messages: Message[] = this.deps.repo
+      .listMessagesBySession(sessionId)
+      .map((m) => ({
+        id: m.id,
+        role: m.role,
+        blocks: safeParseBlocks(m.blocksJson),
+        turnId: m.turnId,
+        createdAt: m.createdAt,
+      }));
+    this.deps.bus.publish(
+      {
+        type: "session.ready",
+        payload: {
+          sessionId,
+          agent: row.agent,
+          model: row.model,
+          messages,
+          lastSeq: this.deps.bus.peekSeq(sessionId),
+        },
+      },
+      { sessionId },
+    );
+  }
+}
+
+function safeParseBlocks(json: string): Block[] {
+  try {
+    const parsed = JSON.parse(json) as unknown;
+    return Array.isArray(parsed) ? (parsed as Block[]) : [];
+  } catch {
+    return [];
+  }
+}
+```
+
+- [ ] **Step 4: Run and confirm it passes**
+
+```bash
+pnpm --filter @agent-team/backend test
+```
+Expected: PASS — all 6 SessionService cases green.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add packages/backend/src/session/session-service.ts \
+        packages/backend/src/session/session-service.test.ts
+git commit -m "feat(backend): add SessionService (create/load/list/active)"
+```
+
+### Task 32: `TurnOrchestrator`
+
+**Files:**
+- Create: `packages/backend/src/session/turn-orchestrator.ts`
+- Create: `packages/backend/src/session/turn-orchestrator.test.ts`
+
+- [ ] **Step 1: Write the failing test**
+
+Create `packages/backend/src/session/turn-orchestrator.test.ts`:
+
+```ts
+import { randomUUID } from "node:crypto";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import type { WSEvent } from "@agent-team/shared";
+import { EventBus } from "../bus/event-bus.js";
+import { MessagePersistSink } from "../bus/message-persist-sink.js";
+import { RingBufferSink } from "../bus/ring-buffer-sink.js";
+import type { EventSink } from "../bus/types.js";
+import { openDb, type Db } from "../db/connection.js";
+import { Repository } from "../db/repository.js";
+import type { AgentEvent, AgentRunner, StartTurnInput, TurnResponder } from "../agent/runner.js";
+import { GitSnapshot } from "../workspace/git-snapshot.js";
+import { WorkspaceManager } from "../workspace/workspace-manager.js";
+import { SessionMutex } from "./mutex.js";
+import { SessionService } from "./session-service.js";
+import { TurnOrchestrator } from "./turn-orchestrator.js";
+
+class ScriptedRunner implements AgentRunner {
+  constructor(private readonly script: AgentEvent[]) {}
+  async *startTurn(_: StartTurnInput, _r: TurnResponder): AsyncIterable<AgentEvent> {
+    for (const e of this.script) yield e;
+  }
+  cancel = async () => {};
+  resume = async (_s: string, p: string | null) => {
+    if (!p) throw new Error("replayHistory");
+    return { providerSessionId: p };
+  };
+}
+
+class RecorderSink implements EventSink {
+  events: WSEvent[] = [];
+  handle(ev: WSEvent) { this.events.push(ev); }
+}
+
+describe("TurnOrchestrator", () => {
+  let wsRoot: string;
+  let db: Db;
+  let repo: Repository;
+  let wm: WorkspaceManager;
+  let git: GitSnapshot;
+  let bus: EventBus;
+  let sink: RecorderSink;
+  let mutex: SessionMutex;
+  let svc: SessionService;
+
+  beforeEach(() => {
+    wsRoot = mkdtempSync(join(tmpdir(), "atelier-orch-"));
+    db = openDb(":memory:");
+    repo = new Repository(db);
+    wm = new WorkspaceManager(wsRoot);
+    git = new GitSnapshot();
+    sink = new RecorderSink();
+    bus = new EventBus([new MessagePersistSink(repo), new RingBufferSink({ capacity: 500 }), sink]);
+    mutex = new SessionMutex();
+    svc = new SessionService({ repo, workspaceMgr: wm, git, bus });
+  });
+
+  afterEach(() => {
+    rmSync(wsRoot, { recursive: true, force: true });
+  });
+
+  it("runs a happy-path turn: commits pre/post, inserts user message, streams deltas, writes assistant message", async () => {
+    const { sessionId } = await svc.create({ agent: "claude", model: "m", systemPrompt: null, title: "T" });
+    const runner = new ScriptedRunner([
+      { kind: "message_start", messageId: "ma" },
+      { kind: "text_delta", messageId: "ma", blockIdx: 0, text: "Hi" },
+      { kind: "message_end", messageId: "ma" },
+      { kind: "turn_end", stopReason: "end_turn", usage: { inputTokens: 1, outputTokens: 2 }, providerSessionId: "ses_1" },
+    ]);
+    const orch = new TurnOrchestrator({ repo, workspaceMgr: wm, git, bus, runner, mutex });
+
+    await orch.run({ sessionId, userText: "hello", clientTurnId: "c1" });
+
+    // DB: one user + one assistant message.
+    const msgs = repo.listMessagesBySession(sessionId);
+    expect(msgs.map((m) => m.role)).toEqual(["user", "assistant"]);
+    // Turn row finalized.
+    const turn = repo.latestTurn(sessionId)!;
+    expect(turn.status).toBe("completed");
+    expect(turn.stopReason).toBe("end_turn");
+    expect(turn.postTurnCommit).toMatch(/^[0-9a-f]{40}$/);
+    expect(turn.preTurnCommit).toMatch(/^[0-9a-f]{40}$/);
+    // Session provider id captured.
+    expect(repo.getSession(sessionId)!.providerSessionId).toBe("ses_1");
+    // Event sequence includes turn.start → message.start → block.text.delta → message.end → turn.end
+    const kinds = sink.events.map((e) => e.type);
+    expect(kinds).toContain("turn.start");
+    expect(kinds).toContain("block.text.delta");
+    expect(kinds).toContain("turn.end");
+  });
+
+  it("rejects a second concurrent run() with turn.already_running error", async () => {
+    const { sessionId } = await svc.create({ agent: "claude", model: "m", systemPrompt: null, title: "T" });
+    const runner = new ScriptedRunner([
+      { kind: "turn_end", stopReason: "end_turn" },
+    ]);
+    const orch = new TurnOrchestrator({ repo, workspaceMgr: wm, git, bus, runner, mutex });
+
+    // Start two runs back-to-back. The mutex serializes them, but the
+    // orchestrator's "no overlap" guard should reject the second one
+    // before it enters the critical section.
+    const first = orch.run({ sessionId, userText: "m1" });
+    await expect(orch.run({ sessionId, userText: "m2" })).rejects.toThrow(/turn.already_running/);
+    await first;
+  });
+
+  it("wraps inner subagent events as subagent.event envelopes", async () => {
+    const { sessionId } = await svc.create({ agent: "claude", model: "m", systemPrompt: null, title: "T" });
+    const runner = new ScriptedRunner([
+      { kind: "message_start", messageId: "ma" },
+      {
+        kind: "subagent_start",
+        subagentId: "sa1",
+        parentToolCallId: "tc1",
+        parentMessageId: "ma",
+        subagentType: "general-purpose",
+        description: "",
+        prompt: "",
+      },
+      {
+        kind: "subagent_event",
+        subagentId: "sa1",
+        inner: { kind: "text_delta", messageId: "ma", blockIdx: 0, text: "inner" },
+      },
+      { kind: "subagent_end", subagentId: "sa1", result: "ok" },
+      { kind: "message_end", messageId: "ma" },
+      { kind: "turn_end", stopReason: "end_turn" },
+    ]);
+    const orch = new TurnOrchestrator({ repo, workspaceMgr: wm, git, bus, runner, mutex });
+    await orch.run({ sessionId, userText: "hi" });
+
+    const sub = sink.events.find((e) => e.type === "subagent.event");
+    expect(sub).toBeDefined();
+    expect((sub as { payload: { inner: { type: string } } }).payload.inner.type)
+      .toBe("block.text.delta");
+  });
+});
+```
+
+- [ ] **Step 2: Run and confirm it fails**
+
+```bash
+pnpm --filter @agent-team/backend test
+```
+Expected: FAIL — `./turn-orchestrator.js` does not exist.
+
+- [ ] **Step 3: Implement `packages/backend/src/session/turn-orchestrator.ts`**
+
+```ts
+import { randomUUID } from "node:crypto";
+import type { Block, Message, WSEvent } from "@agent-team/shared";
+import type { AgentEvent, AgentRunner, TurnResponder } from "../agent/runner.js";
+import type { EventBus } from "../bus/event-bus.js";
+import type { PublishInput } from "../bus/types.js";
+import type { Repository } from "../db/repository.js";
+import type { GitSnapshot } from "../workspace/git-snapshot.js";
+import type { WorkspaceManager } from "../workspace/workspace-manager.js";
+import type { SessionMutex } from "./mutex.js";
+
+export type TurnOrchestratorDeps = {
+  repo: Repository;
+  workspaceMgr: WorkspaceManager;
+  git: GitSnapshot;
+  bus: EventBus;
+  runner: AgentRunner;
+  mutex: SessionMutex;
+};
+
+export type RunTurnInput = {
+  sessionId: string;
+  userText: string;
+  clientTurnId?: string;
+};
+
+export class TurnOrchestrator {
+  private readonly inFlight = new Set<string>();
+  // Per-turn AbortController so cancel() can interrupt a live run.
+  private readonly aborts = new Map<string, AbortController>();
+
+  constructor(private readonly deps: TurnOrchestratorDeps) {}
+
+  async run(input: RunTurnInput): Promise<void> {
+    if (this.inFlight.has(input.sessionId)) {
+      throw new Error("turn.already_running");
+    }
+    this.inFlight.add(input.sessionId);
+    try {
+      await this.deps.mutex.runExclusive(input.sessionId, () =>
+        this.runLocked(input),
+      );
+    } finally {
+      this.inFlight.delete(input.sessionId);
+    }
+  }
+
+  async cancel(sessionId: string, turnId: string): Promise<void> {
+    const ac = this.aborts.get(turnId);
+    if (ac) ac.abort();
+    await this.deps.runner.cancel(turnId);
+  }
+
+  private async runLocked(input: RunTurnInput): Promise<void> {
+    const session = this.deps.repo.getSession(input.sessionId);
+    if (!session) {
+      this.publishError(input.sessionId, "session.not_found", `no such session ${input.sessionId}`);
+      return;
+    }
+
+    const turnId = input.clientTurnId ?? randomUUID();
+    const sequenceNum = (this.deps.repo.latestTurn(input.sessionId)?.sequenceNum ?? 0) + 1;
+    const now = Date.now();
+
+    // 1. pre-turn git commit
+    const preTurnCommit = await this.deps.git.commitPreTurn(session.cwd, turnId);
+
+    // 2. insert turn row (in_progress)
+    this.deps.repo.insertTurn({
+      id: turnId,
+      sessionId: input.sessionId,
+      sequenceNum,
+      status: "in_progress",
+      preTurnCommit,
+      firstUserText: truncate(input.userText, 80),
+      createdAt: now,
+    });
+
+    // 3. insert user message row
+    const userMessageId = randomUUID();
+    const userBlocks: Block[] = [{ type: "text", text: input.userText }];
+    this.deps.repo.insertMessage({
+      id: userMessageId,
+      sessionId: input.sessionId,
+      turnId,
+      role: "user",
+      blocksJson: JSON.stringify(userBlocks),
+      createdAt: now,
+    });
+
+    // 4. publish turn.start
+    const userMessage: Message = {
+      id: userMessageId,
+      role: "user",
+      blocks: userBlocks,
+      turnId,
+      createdAt: now,
+    };
+    this.deps.bus.publish(
+      { type: "turn.start", payload: { turnId, userMessage } },
+      { sessionId: input.sessionId, turnId },
+    );
+
+    // 5. build history for replay path (providerSessionId === null)
+    const replayHistory = session.providerSessionId
+      ? undefined
+      : this.loadHistory(input.sessionId);
+
+    // 6. drive the runner, translate AgentEvents to WSEvents
+    const ac = new AbortController();
+    this.aborts.set(turnId, ac);
+    const responder: TurnResponder = {
+      respondAskUser: () => {},
+      respondPermission: () => {},
+    };
+
+    let capturedProviderSessionId: string | null = null;
+    let stopReason: "end_turn" | "max_tokens" | "tool_use_pending" | "cancelled" | "error" = "end_turn";
+    let usage: { inputTokens: number; outputTokens: number } | undefined;
+
+    try {
+      for await (const ev of this.deps.runner.startTurn(
+        {
+          sessionId: input.sessionId,
+          providerSessionId: session.providerSessionId,
+          userText: input.userText,
+          turnId,
+          abortSignal: ac.signal,
+          cwd: session.cwd,
+          model: session.model,
+          systemPrompt: session.systemPrompt,
+          ...(replayHistory ? { replayHistory } : {}),
+        },
+        responder,
+      )) {
+        if (ev.kind === "turn_end") {
+          stopReason = ev.stopReason;
+          usage = ev.usage;
+          capturedProviderSessionId = ev.providerSessionId ?? null;
+          continue;
+        }
+        const wsEv = this.toWsEvent(ev, turnId);
+        if (wsEv) {
+          this.deps.bus.publish(wsEv, { sessionId: input.sessionId, turnId });
+        }
+      }
+    } catch (err) {
+      this.publishError(input.sessionId, "internal", String(err), turnId);
+      stopReason = "error";
+    } finally {
+      this.aborts.delete(turnId);
+    }
+
+    // 7. post-turn: capture provider session id, commit, finalize turn row
+    if (capturedProviderSessionId) {
+      this.deps.repo.updateProviderSessionId(input.sessionId, capturedProviderSessionId);
+    }
+    const postTurnCommit = await this.deps.git.commitPostTurn(session.cwd, turnId);
+    this.deps.repo.updateTurn(turnId, {
+      status: stopReason === "error" ? "error" : stopReason === "cancelled" ? "cancelled" : "completed",
+      stopReason,
+      ...(usage ? { usage } : {}),
+      postTurnCommit,
+      completedAt: Date.now(),
+    });
+
+    // 8. publish turn.end — MessagePersistSink will flush assistant messages
+    this.deps.bus.publish(
+      { type: "turn.end", payload: { turnId, stopReason, ...(usage ? { usage } : {}) } },
+      { sessionId: input.sessionId, turnId },
+    );
+  }
+
+  private toWsEvent(ev: AgentEvent, turnId: string): PublishInput | null {
+    switch (ev.kind) {
+      case "message_start":
+        return { type: "message.start", payload: { turnId, messageId: ev.messageId, role: "assistant" } };
+      case "message_end":
+        return { type: "message.end", payload: { messageId: ev.messageId } };
+      case "text_delta":
+        return {
+          type: "block.text.delta",
+          payload: { messageId: ev.messageId, blockIdx: ev.blockIdx, text: ev.text },
+        };
+      case "thinking_delta":
+        return {
+          type: "block.thinking.delta",
+          payload: { messageId: ev.messageId, blockIdx: ev.blockIdx, text: ev.text },
+        };
+      case "tool_use":
+        return {
+          type: "block.tool_use",
+          payload: {
+            messageId: ev.messageId,
+            blockIdx: ev.blockIdx,
+            toolCallId: ev.toolCallId,
+            name: ev.name,
+            input: ev.input,
+          },
+        };
+      case "tool_result":
+        return {
+          type: "block.tool_result",
+          payload: { toolCallId: ev.toolCallId, output: ev.output, isError: ev.isError },
+        };
+      case "todo_update":
+        return {
+          type: "todo.update",
+          payload: { messageId: ev.messageId, blockIdx: ev.blockIdx, todos: ev.todos },
+        };
+      case "skill_invoked":
+        return {
+          type: "skill.invoked",
+          payload: {
+            messageId: ev.messageId,
+            blockIdx: ev.blockIdx,
+            skillName: ev.skillName,
+            ...(ev.args !== undefined ? { args: ev.args } : {}),
+            source: ev.source,
+          },
+        };
+      case "subagent_start":
+        return {
+          type: "subagent.start",
+          payload: {
+            subagentId: ev.subagentId,
+            parentToolCallId: ev.parentToolCallId,
+            parentMessageId: ev.parentMessageId,
+            subagentType: ev.subagentType,
+            description: ev.description,
+            prompt: ev.prompt,
+          },
+        };
+      case "subagent_end":
+        return {
+          type: "subagent.end",
+          payload: {
+            subagentId: ev.subagentId,
+            result: ev.result,
+            ...(ev.usage ? { usage: ev.usage } : {}),
+          },
+        };
+      case "subagent_event": {
+        const inner = this.toWsEvent(ev.inner, turnId);
+        if (!inner) return null;
+        // Stamp the inner event with zeroed seq/ts; the bus would normally
+        // do that, but inner events are embedded, not dispatched directly.
+        const innerWs: WSEvent = { ...inner, seq: 0, ts: 0 } as WSEvent;
+        return {
+          type: "subagent.event",
+          payload: { subagentId: ev.subagentId, inner: innerWs },
+        };
+      }
+      case "askuser_request":
+        return {
+          type: "askuser.request",
+          payload: {
+            requestId: ev.requestId,
+            toolCallId: ev.toolCallId,
+            questions: ev.questions,
+          },
+        };
+      case "permission_request":
+        return {
+          type: "permission.request",
+          payload: {
+            requestId: ev.requestId,
+            toolCallId: ev.toolCallId,
+            tool: ev.tool,
+            input: ev.input,
+          },
+        };
+      case "raw":
+        return {
+          type: "block.raw",
+          payload: { subtype: ev.subtype, data: ev.data },
+        };
+      case "turn_end":
+        return null; // handled out-of-band
+      default: {
+        const _exhaustive: never = ev;
+        void _exhaustive;
+        return null;
+      }
+    }
+  }
+
+  private loadHistory(sessionId: string): Message[] {
+    return this.deps.repo.listMessagesBySession(sessionId).map((m) => ({
+      id: m.id,
+      role: m.role,
+      blocks: safeParseBlocks(m.blocksJson),
+      turnId: m.turnId,
+      createdAt: m.createdAt,
+    }));
+  }
+
+  private publishError(
+    sessionId: string,
+    code: "session.not_found" | "internal" | "turn.already_running",
+    message: string,
+    turnId?: string,
+  ): void {
+    this.deps.bus.publish(
+      {
+        type: "error",
+        payload: { code, message, retriable: false, ...(turnId ? { turnId } : {}) },
+      },
+      { sessionId, ...(turnId ? { turnId } : {}) },
+    );
+  }
+}
+
+function truncate(text: string, n: number): string {
+  return text.length <= n ? text : text.slice(0, n - 1) + "…";
+}
+
+function safeParseBlocks(json: string): Block[] {
+  try {
+    const parsed = JSON.parse(json) as unknown;
+    return Array.isArray(parsed) ? (parsed as Block[]) : [];
+  } catch {
+    return [];
+  }
+}
+```
+
+- [ ] **Step 4: Run and confirm it passes**
+
+```bash
+pnpm --filter @agent-team/backend test
+```
+Expected: PASS — all 3 TurnOrchestrator cases green, all earlier suites still green.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add packages/backend/src/session/turn-orchestrator.ts \
+        packages/backend/src/session/turn-orchestrator.test.ts
+git commit -m "feat(backend): add TurnOrchestrator driving AgentRunner end-to-end"
+```
+
+### Chunk 8 exit criteria
+
+- `pnpm -r test` passes, including 4 + 6 + 3 new cases.
+- `SessionMutex` serializes `runExclusive(key, fn)` per-key and parallels across keys.
+- `SessionService.create` produces: a workspace dir with a `.git` repo + initial commit, a DB row with `providerSessionId = NULL`, an active-session pointer set, and a `session.ready` event on the bus.
+- `TurnOrchestrator.run` persists `turn` + user `Message`, drives the `AgentRunner`, translates every `AgentEvent` kind listed in spec §6.1 to the matching `WSEvent` (with `subagent_event.inner` wrapping), updates `providerSessionId` on `turn_end`, commits post-turn, finalizes the turn row, and publishes `turn.end`.
+- Concurrent `run()` on the same `sessionId` is rejected with `turn.already_running` before entering the critical section.
+- `ws/connection` integration + real C2S routing land in Chunk 9; the orchestrator is exercised in Chunk 9's integration test via a real WebSocket.
+
+---
+
+(Chunks 9 through 11 will be appended after Chunk 8 is reviewed and approved.)
