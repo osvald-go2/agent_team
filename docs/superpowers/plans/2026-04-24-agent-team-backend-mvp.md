@@ -1132,12 +1132,10 @@ Expected: exits 0; `packages/backend/dist/index.js` exists.
 
 Run:
 ```bash
-node -e "import('@agent-team/shared').then(m => console.log(Object.keys(m).length > 0 ? 'OK' : 'EMPTY'))" \
-  --experimental-vm-modules 2>/dev/null || \
-pnpm --filter @agent-team/backend exec node -e \
-  "import('@agent-team/shared').then(m => console.log(typeof m))"
+pnpm --filter @agent-team/backend exec node --input-type=module -e \
+  "import('@agent-team/shared').then(m => { if (Object.keys(m).length === 0) { console.error('EMPTY'); process.exit(1); } console.log('OK'); })"
 ```
-Expected: prints `OK` or `object`. Any import error means the `workspace:*` link is broken — stop and fix before continuing.
+Expected: prints `OK`. Any import error means the `workspace:*` link is broken — stop and fix before continuing (confirm `pnpm install` was run after Step 1 and `packages/backend/node_modules/@agent-team/shared` is a symlink).
 
 - [ ] **Step 8: Commit**
 
@@ -1597,10 +1595,14 @@ describe("ws server — minimal ping/pong", () => {
   it("ignores malformed JSON frames without crashing the server", async () => {
     const c1 = new WebSocket(wsUrl);
     await new Promise<void>((resolve) => c1.once("open", () => resolve()));
+    // IMPORTANT: attach the message listener BEFORE sending the valid ping,
+    // and AFTER sending the malformed frame. The server drops malformed
+    // frames silently, so the next message the client sees must be the pong.
+    // Do not reorder these three calls.
     c1.send("this is not json");
-    // Sending a valid ping afterwards should still work.
+    const pong = recv(c1);
     c1.send(JSON.stringify({ type: "ping" }));
-    const raw = await recv(c1);
+    const raw = await pong;
     expect(JSON.parse(raw).type).toBe("pong");
     c1.close();
   });
@@ -1745,23 +1747,39 @@ pnpm --filter @agent-team/backend build
 ```
 Expected: exits 0.
 
-- [ ] **Step 3: Smoke-run the server end-to-end**
+- [ ] **Step 3: Smoke-run the server end-to-end (interactive, not CI)**
 
-Run (in one terminal):
+Run from the **repo root**:
 ```bash
+cd "$(git rev-parse --show-toplevel)"
 cp -n .env.example .env
-# open .env and set ANTHROPIC_API_KEY=sk-ant-placeholder (any non-empty value is fine for chunk 2)
-pnpm --filter @agent-team/backend build && node packages/backend/dist/index.js &
+# Edit .env and set ANTHROPIC_API_KEY=sk-ant-placeholder (any non-empty value is fine for chunk 2)
+
+pnpm --filter @agent-team/backend build
+node packages/backend/dist/index.js &
 SERVER_PID=$!
-sleep 1
-curl -sf http://127.0.0.1:3001/health && echo
-curl -sf http://127.0.0.1:3001/metrics
-kill $SERVER_PID
+
+# Wait up to 5 seconds for the server to accept connections.
+for i in 1 2 3 4 5; do
+  if curl -sf http://127.0.0.1:3001/health > /dev/null; then break; fi
+  sleep 1
+done
+
+HEALTH=$(curl -sf http://127.0.0.1:3001/health) || { echo "health failed"; kill $SERVER_PID 2>/dev/null; exit 1; }
+echo "$HEALTH" | grep -q '"ok":true' && echo "health OK" || { echo "health body unexpected: $HEALTH"; kill $SERVER_PID 2>/dev/null; exit 1; }
+
+METRICS=$(curl -sf http://127.0.0.1:3001/metrics) || { echo "metrics failed"; kill $SERVER_PID 2>/dev/null; exit 1; }
+echo "$METRICS" | grep -qE '^active_sessions\s+0'  || { echo "metrics missing active_sessions"; kill $SERVER_PID 2>/dev/null; exit 1; }
+echo "$METRICS" | grep -qE '^ws_connections\s+0'   || { echo "metrics missing ws_connections"; kill $SERVER_PID 2>/dev/null; exit 1; }
+echo "$METRICS" | grep -qE '^total_turns\s+0'      || { echo "metrics missing total_turns"; kill $SERVER_PID 2>/dev/null; exit 1; }
+echo "$METRICS" | grep -qE '^orphaned_turns\s+0'   || { echo "metrics missing orphaned_turns"; kill $SERVER_PID 2>/dev/null; exit 1; }
+echo "metrics OK"
+
+kill $SERVER_PID 2>/dev/null || true
 ```
-Expected:
-- `curl /health` prints `{"ok":true,"version":"0.0.0"}`.
-- `curl /metrics` prints four lines starting with `active_sessions`, `ws_connections`, `total_turns`, `orphaned_turns`, all with value `0`.
-- No stack traces in server stderr.
+Expected: prints `health OK` and `metrics OK`; no stack traces appear on stderr.
+
+Note: this smoke test is meant for interactive developer use after implementing Chunk 2. Do not add it to CI — the sleep loop is not timing-robust enough for shared runners. CI runs `pnpm -r test` which covers the HTTP and WS paths via real integration tests.
 
 - [ ] **Step 4: Commit**
 
