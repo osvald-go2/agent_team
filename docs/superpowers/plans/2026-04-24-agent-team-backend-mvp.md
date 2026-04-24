@@ -5882,7 +5882,6 @@ export type CreateSessionInput = {
   model: string;
   title: string;
   systemPrompt: string | null;
-  cwd?: string;
 };
 
 export type CreateSessionOutput = {
@@ -6188,7 +6187,7 @@ Expected: FAIL — `./turn-orchestrator.js` does not exist.
 
 ```ts
 import { randomUUID } from "node:crypto";
-import type { Block, Message, WSEvent } from "@agent-team/shared";
+import type { AskAnswer, Block, Message, TokenUsage, WSEvent } from "@agent-team/shared";
 import type { AgentEvent, AgentRunner, TurnResponder } from "../agent/runner.js";
 import type { EventBus } from "../bus/event-bus.js";
 import type { PublishInput } from "../bus/types.js";
@@ -6216,6 +6215,10 @@ export class TurnOrchestrator {
   private readonly inFlight = new Set<string>();
   // Per-turn AbortController so cancel() can interrupt a live run.
   private readonly aborts = new Map<string, AbortController>();
+  // Per-session responder — populated while runLocked is in flight so that
+  // Chunk 9's WebSocket layer can forward askuser/permission responses into
+  // the active turn without reaching into TurnOrchestrator internals.
+  private readonly responderBySession = new Map<string, TurnResponder>();
 
   constructor(private readonly deps: TurnOrchestratorDeps) {}
 
@@ -6233,10 +6236,25 @@ export class TurnOrchestrator {
     }
   }
 
-  async cancel(sessionId: string, turnId: string): Promise<void> {
+  async cancel(turnId: string): Promise<void> {
     const ac = this.aborts.get(turnId);
     if (ac) ac.abort();
     await this.deps.runner.cancel(turnId);
+  }
+
+  // Forward an askuser response into the session's active turn. Called by
+  // ws/connection in Chunk 9 when a client sends `askuser.respond`. Silent
+  // no-op if no turn is in flight.
+  respondAskUser(sessionId: string, requestId: string, answers: AskAnswer[]): void {
+    this.responderBySession.get(sessionId)?.respondAskUser(requestId, answers);
+  }
+
+  respondPermission(
+    sessionId: string,
+    requestId: string,
+    decision: "allow_once" | "allow_always" | "deny",
+  ): void {
+    this.responderBySession.get(sessionId)?.respondPermission(requestId, decision);
   }
 
   private async runLocked(input: RunTurnInput): Promise<void> {
@@ -6297,14 +6315,18 @@ export class TurnOrchestrator {
     // 6. drive the runner, translate AgentEvents to WSEvents
     const ac = new AbortController();
     this.aborts.set(turnId, ac);
+    // MVP responder buffers pending requests; Chunk 9 wires it to the WS
+    // layer via respondAskUser / respondPermission on this class.
+    const pending = new Map<string, AskAnswer[] | "allow_once" | "allow_always" | "deny">();
     const responder: TurnResponder = {
-      respondAskUser: () => {},
-      respondPermission: () => {},
+      respondAskUser: (requestId, answers) => { pending.set(requestId, answers); },
+      respondPermission: (requestId, decision) => { pending.set(requestId, decision); },
     };
+    this.responderBySession.set(input.sessionId, responder);
 
     let capturedProviderSessionId: string | null = null;
     let stopReason: "end_turn" | "max_tokens" | "tool_use_pending" | "cancelled" | "error" = "end_turn";
-    let usage: { inputTokens: number; outputTokens: number } | undefined;
+    let usage: TokenUsage | undefined;
 
     try {
       for await (const ev of this.deps.runner.startTurn(
@@ -6337,6 +6359,7 @@ export class TurnOrchestrator {
       stopReason = "error";
     } finally {
       this.aborts.delete(turnId);
+      this.responderBySession.delete(input.sessionId);
     }
 
     // 7. post-turn: capture provider session id, commit, finalize turn row
