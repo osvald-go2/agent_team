@@ -1031,4 +1031,754 @@ All of the following must be true before starting Chunk 2:
 
 ---
 
-(The remaining chunks — 2 through 8 — will be appended after this chunk is reviewed and approved.)
+## Chunk 2: Backend Package Scaffold + Config + Logger + HTTP + Minimal WebSocket
+
+Goal of this chunk: stand up `packages/backend` as a Node.js + TypeScript ESM package. Load and validate `.env` config. Wire `pino` logging. Start an `http` server that answers `GET /health` and a placeholder `GET /metrics`. Accept WebSocket upgrades on `/ws` and respond to a `{"type":"ping"}` message with `{"type":"pong"}`. No database, no agent, no session logic yet — the point is to prove the process starts, binds, and exchanges messages end-to-end with a test WebSocket client.
+
+### Task 8: Backend package scaffold
+
+**Files:**
+- Create: `packages/backend/package.json`
+- Create: `packages/backend/tsconfig.json`
+- Create: `packages/backend/vitest.config.ts`
+- Create: `packages/backend/src/index.ts` (placeholder)
+
+- [ ] **Step 1: Write `packages/backend/package.json`**
+
+```json
+{
+  "name": "@agent-team/backend",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "scripts": {
+    "build": "tsc -b",
+    "clean": "rm -rf dist tsconfig.tsbuildinfo",
+    "dev": "tsx watch src/index.ts",
+    "start": "node dist/index.js",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@agent-team/shared": "workspace:*",
+    "dotenv": "^16.4.5",
+    "pino": "^9.5.0",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.5.4",
+    "@types/ws": "^8.5.12",
+    "tsx": "^4.19.1",
+    "typescript": "^5.5.4",
+    "vitest": "^2.1.1"
+  }
+}
+```
+
+- [ ] **Step 2: Write `packages/backend/tsconfig.json`**
+
+```json
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "./dist",
+    "rootDir": "./src",
+    "tsBuildInfoFile": "./tsconfig.tsbuildinfo",
+    "types": ["node"]
+  },
+  "references": [{ "path": "../shared" }],
+  "include": ["src/**/*"]
+}
+```
+
+- [ ] **Step 3: Write `packages/backend/vitest.config.ts`**
+
+```ts
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  test: {
+    include: ["src/**/*.test.ts", "tests/**/*.test.ts"],
+    passWithNoTests: false,
+    testTimeout: 10_000,
+  },
+});
+```
+
+- [ ] **Step 4: Write a placeholder `packages/backend/src/index.ts`**
+
+```ts
+// Entry point. Implemented in subsequent tasks.
+export {};
+```
+
+- [ ] **Step 5: Install dependencies**
+
+Run:
+```bash
+pnpm install
+```
+Expected: exits 0; `packages/backend/node_modules` is symlinked; `@agent-team/shared` is linked via `workspace:*`.
+
+- [ ] **Step 6: Verify the backend package builds (should be a no-op)**
+
+Run:
+```bash
+pnpm --filter @agent-team/backend build
+```
+Expected: exits 0; `packages/backend/dist/index.js` exists.
+
+- [ ] **Step 7: Verify shared is referenced correctly**
+
+Run:
+```bash
+node -e "import('@agent-team/shared').then(m => console.log(Object.keys(m).length > 0 ? 'OK' : 'EMPTY'))" \
+  --experimental-vm-modules 2>/dev/null || \
+pnpm --filter @agent-team/backend exec node -e \
+  "import('@agent-team/shared').then(m => console.log(typeof m))"
+```
+Expected: prints `OK` or `object`. Any import error means the `workspace:*` link is broken — stop and fix before continuing.
+
+- [ ] **Step 8: Commit**
+
+```bash
+git add packages/backend/
+git commit -m "feat(backend): scaffold package with tsconfig + vitest"
+```
+
+### Task 9: Config loader
+
+**Files:**
+- Create: `packages/backend/src/config.ts`
+- Create: `packages/backend/src/config.test.ts`
+
+- [ ] **Step 1: Write the failing test**
+
+Create `packages/backend/src/config.test.ts`:
+
+```ts
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { loadConfig } from "./config.js";
+
+const snapshotEnv = () => ({ ...process.env });
+let saved: NodeJS.ProcessEnv;
+
+describe("loadConfig", () => {
+  beforeEach(() => {
+    saved = snapshotEnv();
+  });
+  afterEach(() => {
+    process.env = saved;
+  });
+
+  it("loads all required fields from env", () => {
+    process.env = {
+      ...saved,
+      ANTHROPIC_API_KEY: "sk-ant-test",
+      PORT: "4567",
+      DB_PATH: "/tmp/test.db",
+      WORKSPACE_ROOT: "/tmp/ws",
+      DEFAULT_MODEL: "claude-sonnet-4-6",
+      LOG_LEVEL: "debug",
+      CLAUDE_SOURCE: "sdk",
+    };
+    const cfg = loadConfig();
+    expect(cfg.anthropicApiKey).toBe("sk-ant-test");
+    expect(cfg.port).toBe(4567);
+    expect(cfg.dbPath).toBe("/tmp/test.db");
+    expect(cfg.workspaceRoot).toBe("/tmp/ws");
+    expect(cfg.defaultModel).toBe("claude-sonnet-4-6");
+    expect(cfg.logLevel).toBe("debug");
+    expect(cfg.claudeSource).toBe("sdk");
+  });
+
+  it("applies documented defaults when optional vars are missing", () => {
+    process.env = {
+      ...saved,
+      ANTHROPIC_API_KEY: "sk-ant-test",
+    };
+    delete process.env.PORT;
+    delete process.env.DB_PATH;
+    delete process.env.WORKSPACE_ROOT;
+    delete process.env.DEFAULT_MODEL;
+    delete process.env.LOG_LEVEL;
+    delete process.env.CLAUDE_SOURCE;
+    const cfg = loadConfig();
+    expect(cfg.port).toBe(3001);
+    expect(cfg.dbPath).toBe("./data/atelier.db");
+    expect(cfg.workspaceRoot).toBe("./workspaces");
+    expect(cfg.defaultModel).toBe("claude-sonnet-4-6");
+    expect(cfg.logLevel).toBe("info");
+    expect(cfg.claudeSource).toBe("sdk");
+  });
+
+  it("throws if ANTHROPIC_API_KEY is missing", () => {
+    process.env = { ...saved };
+    delete process.env.ANTHROPIC_API_KEY;
+    expect(() => loadConfig()).toThrow(/ANTHROPIC_API_KEY/);
+  });
+
+  it("throws if PORT is not a valid integer", () => {
+    process.env = {
+      ...saved,
+      ANTHROPIC_API_KEY: "sk-ant-test",
+      PORT: "abc",
+    };
+    expect(() => loadConfig()).toThrow(/PORT/);
+  });
+
+  it("throws if CLAUDE_SOURCE is not sdk or cli", () => {
+    process.env = {
+      ...saved,
+      ANTHROPIC_API_KEY: "sk-ant-test",
+      CLAUDE_SOURCE: "xyz",
+    };
+    expect(() => loadConfig()).toThrow(/CLAUDE_SOURCE/);
+  });
+});
+```
+
+- [ ] **Step 2: Run the test and confirm it fails**
+
+Run:
+```bash
+pnpm --filter @agent-team/backend test
+```
+Expected: FAIL — `config.ts` does not exist.
+
+- [ ] **Step 3: Implement `packages/backend/src/config.ts`**
+
+```ts
+import "dotenv/config";
+
+export type ClaudeSourceKind = "sdk" | "cli";
+export type LogLevel = "fatal" | "error" | "warn" | "info" | "debug" | "trace";
+
+export type AppConfig = {
+  anthropicApiKey: string;
+  port: number;
+  dbPath: string;
+  workspaceRoot: string;
+  defaultModel: string;
+  logLevel: LogLevel;
+  claudeSource: ClaudeSourceKind;
+};
+
+const VALID_LOG_LEVELS: ReadonlySet<LogLevel> = new Set([
+  "fatal",
+  "error",
+  "warn",
+  "info",
+  "debug",
+  "trace",
+]);
+
+function required(name: string): string {
+  const v = process.env[name];
+  if (!v || v.length === 0) {
+    throw new Error(`Config error: ${name} is required but missing or empty.`);
+  }
+  return v;
+}
+
+function optional(name: string, defaultValue: string): string {
+  const v = process.env[name];
+  return v && v.length > 0 ? v : defaultValue;
+}
+
+function asInt(name: string, raw: string): number {
+  if (!/^\d+$/.test(raw)) {
+    throw new Error(`Config error: ${name}="${raw}" is not a non-negative integer.`);
+  }
+  return Number.parseInt(raw, 10);
+}
+
+function asClaudeSource(raw: string): ClaudeSourceKind {
+  if (raw !== "sdk" && raw !== "cli") {
+    throw new Error(`Config error: CLAUDE_SOURCE="${raw}" must be "sdk" or "cli".`);
+  }
+  return raw;
+}
+
+function asLogLevel(raw: string): LogLevel {
+  if (!VALID_LOG_LEVELS.has(raw as LogLevel)) {
+    throw new Error(`Config error: LOG_LEVEL="${raw}" must be one of ${[...VALID_LOG_LEVELS].join(", ")}.`);
+  }
+  return raw as LogLevel;
+}
+
+export function loadConfig(): AppConfig {
+  return {
+    anthropicApiKey: required("ANTHROPIC_API_KEY"),
+    port: asInt("PORT", optional("PORT", "3001")),
+    dbPath: optional("DB_PATH", "./data/atelier.db"),
+    workspaceRoot: optional("WORKSPACE_ROOT", "./workspaces"),
+    defaultModel: optional("DEFAULT_MODEL", "claude-sonnet-4-6"),
+    logLevel: asLogLevel(optional("LOG_LEVEL", "info")),
+    claudeSource: asClaudeSource(optional("CLAUDE_SOURCE", "sdk")),
+  };
+}
+```
+
+- [ ] **Step 4: Run the test and confirm it passes**
+
+Run:
+```bash
+pnpm --filter @agent-team/backend test
+```
+Expected: PASS — all 5 cases green.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add packages/backend/src/config.ts packages/backend/src/config.test.ts
+git commit -m "feat(backend): add validated env config loader"
+```
+
+### Task 10: Logger
+
+**Files:**
+- Create: `packages/backend/src/logger.ts`
+
+- [ ] **Step 1: Implement `packages/backend/src/logger.ts`**
+
+No TDD here — pino is a thin wrapper we pass through. Just create:
+
+```ts
+import pino from "pino";
+import type { LogLevel } from "./config.js";
+
+export type Logger = pino.Logger;
+
+export function createLogger(level: LogLevel): Logger {
+  return pino({
+    level,
+    base: undefined,
+    timestamp: pino.stdTimeFunctions.isoTime,
+  });
+}
+```
+
+- [ ] **Step 2: Verify the backend still builds**
+
+Run:
+```bash
+pnpm --filter @agent-team/backend build
+```
+Expected: exits 0.
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add packages/backend/src/logger.ts
+git commit -m "feat(backend): add pino logger wrapper"
+```
+
+### Task 11: HTTP server with `/health` and `/metrics` placeholder
+
+**Files:**
+- Create: `packages/backend/src/http/server.ts`
+- Create: `packages/backend/src/http/server.test.ts`
+
+- [ ] **Step 1: Write the failing integration test**
+
+Create `packages/backend/src/http/server.test.ts`:
+
+```ts
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import type { AddressInfo } from "node:net";
+import { createHttpServer, type HttpServerHandle } from "./server.js";
+import { createLogger } from "../logger.js";
+
+const log = createLogger("fatal");
+
+describe("http server", () => {
+  let handle: HttpServerHandle;
+  let baseUrl: string;
+
+  beforeEach(async () => {
+    handle = await createHttpServer({ port: 0, logger: log });
+    const addr = handle.server.address() as AddressInfo;
+    baseUrl = `http://127.0.0.1:${addr.port}`;
+  });
+
+  afterEach(async () => {
+    await handle.close();
+  });
+
+  it("GET /health returns ok + version", async () => {
+    const res = await fetch(`${baseUrl}/health`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { ok: boolean; version: string };
+    expect(body.ok).toBe(true);
+    expect(typeof body.version).toBe("string");
+  });
+
+  it("GET /metrics returns plain text with zero values in chunk 2", async () => {
+    const res = await fetch(`${baseUrl}/metrics`);
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toMatch(/text\/plain/);
+    const text = await res.text();
+    expect(text).toMatch(/active_sessions\s+0/);
+    expect(text).toMatch(/ws_connections\s+0/);
+    expect(text).toMatch(/total_turns\s+0/);
+    expect(text).toMatch(/orphaned_turns\s+0/);
+  });
+
+  it("unknown path returns 404 JSON", async () => {
+    const res = await fetch(`${baseUrl}/nope`);
+    expect(res.status).toBe(404);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toBe("not_found");
+  });
+});
+```
+
+- [ ] **Step 2: Run the test and confirm it fails**
+
+Run:
+```bash
+pnpm --filter @agent-team/backend test
+```
+Expected: FAIL — `./server.js` does not exist.
+
+- [ ] **Step 3: Implement `packages/backend/src/http/server.ts`**
+
+```ts
+import http from "node:http";
+import type { Server } from "node:http";
+import type { Logger } from "../logger.js";
+
+export type MetricsSource = {
+  activeSessions: () => number;
+  wsConnections: () => number;
+  totalTurns: () => number;
+  orphanedTurns: () => number;
+};
+
+export type HttpServerOptions = {
+  port: number;
+  logger: Logger;
+  metrics?: MetricsSource;
+  version?: string;
+};
+
+export type HttpServerHandle = {
+  server: Server;
+  close: () => Promise<void>;
+};
+
+const ZERO_METRICS: MetricsSource = {
+  activeSessions: () => 0,
+  wsConnections: () => 0,
+  totalTurns: () => 0,
+  orphanedTurns: () => 0,
+};
+
+export async function createHttpServer(
+  opts: HttpServerOptions,
+): Promise<HttpServerHandle> {
+  const { port, logger } = opts;
+  const metrics = opts.metrics ?? ZERO_METRICS;
+  const version = opts.version ?? "0.0.0";
+
+  const server = http.createServer((req, res) => {
+    const url = req.url ?? "/";
+    if (req.method === "GET" && url === "/health") {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ ok: true, version }));
+      return;
+    }
+    if (req.method === "GET" && url === "/metrics") {
+      const body =
+        `active_sessions ${metrics.activeSessions()}\n` +
+        `ws_connections ${metrics.wsConnections()}\n` +
+        `total_turns ${metrics.totalTurns()}\n` +
+        `orphaned_turns ${metrics.orphanedTurns()}\n`;
+      res.writeHead(200, { "content-type": "text/plain; charset=utf-8" });
+      res.end(body);
+      return;
+    }
+    res.writeHead(404, { "content-type": "application/json" });
+    res.end(JSON.stringify({ error: "not_found" }));
+  });
+
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(port, "127.0.0.1", () => {
+      server.off("error", reject);
+      resolve();
+    });
+  });
+
+  logger.info({ port }, "http server listening");
+
+  return {
+    server,
+    close: () =>
+      new Promise<void>((resolve, reject) => {
+        server.close((err) => (err ? reject(err) : resolve()));
+      }),
+  };
+}
+```
+
+- [ ] **Step 4: Run the test and confirm it passes**
+
+Run:
+```bash
+pnpm --filter @agent-team/backend test
+```
+Expected: PASS — all 3 HTTP cases plus the earlier config cases green.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add packages/backend/src/http/server.ts packages/backend/src/http/server.test.ts
+git commit -m "feat(backend): add http server with /health and /metrics"
+```
+
+### Task 12: WebSocket server with ping/pong echo
+
+**Files:**
+- Create: `packages/backend/src/ws/server.ts`
+- Create: `packages/backend/src/ws/server.test.ts`
+
+- [ ] **Step 1: Write the failing integration test**
+
+Create `packages/backend/src/ws/server.test.ts`:
+
+```ts
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import type { AddressInfo } from "node:net";
+import WebSocket from "ws";
+import { createHttpServer, type HttpServerHandle } from "../http/server.js";
+import { attachWsServer, type WsServerHandle } from "./server.js";
+import { createLogger } from "../logger.js";
+
+const log = createLogger("fatal");
+
+const recv = (ws: WebSocket): Promise<string> =>
+  new Promise((resolve, reject) => {
+    ws.once("message", (data) => resolve(data.toString("utf8")));
+    ws.once("error", reject);
+  });
+
+describe("ws server — minimal ping/pong", () => {
+  let http: HttpServerHandle;
+  let ws: WsServerHandle;
+  let wsUrl: string;
+
+  beforeEach(async () => {
+    http = await createHttpServer({ port: 0, logger: log });
+    ws = attachWsServer({ httpServer: http.server, path: "/ws", logger: log });
+    const addr = http.server.address() as AddressInfo;
+    wsUrl = `ws://127.0.0.1:${addr.port}/ws`;
+  });
+
+  afterEach(async () => {
+    ws.close();
+    await http.close();
+  });
+
+  it("responds to {type:'ping'} with {type:'pong'}", async () => {
+    const client = new WebSocket(wsUrl);
+    await new Promise<void>((resolve, reject) => {
+      client.once("open", () => resolve());
+      client.once("error", reject);
+    });
+    client.send(JSON.stringify({ type: "ping" }));
+    const raw = await recv(client);
+    const msg = JSON.parse(raw) as { type: string };
+    expect(msg.type).toBe("pong");
+    client.close();
+  });
+
+  it("ignores malformed JSON frames without crashing the server", async () => {
+    const c1 = new WebSocket(wsUrl);
+    await new Promise<void>((resolve) => c1.once("open", () => resolve()));
+    c1.send("this is not json");
+    // Sending a valid ping afterwards should still work.
+    c1.send(JSON.stringify({ type: "ping" }));
+    const raw = await recv(c1);
+    expect(JSON.parse(raw).type).toBe("pong");
+    c1.close();
+  });
+});
+```
+
+- [ ] **Step 2: Run the test and confirm it fails**
+
+Run:
+```bash
+pnpm --filter @agent-team/backend test
+```
+Expected: FAIL — `./server.js` does not exist.
+
+- [ ] **Step 3: Implement `packages/backend/src/ws/server.ts`**
+
+```ts
+import type { Server as HttpServer } from "node:http";
+import WebSocket, { WebSocketServer } from "ws";
+import type { Logger } from "../logger.js";
+
+export type WsServerOptions = {
+  httpServer: HttpServer;
+  path: string;
+  logger: Logger;
+};
+
+export type WsServerHandle = {
+  wss: WebSocketServer;
+  close: () => void;
+};
+
+export function attachWsServer(opts: WsServerOptions): WsServerHandle {
+  const { httpServer, path, logger } = opts;
+  const wss = new WebSocketServer({ server: httpServer, path });
+
+  wss.on("connection", (socket) => {
+    logger.info("ws connection opened");
+
+    socket.on("message", (raw) => {
+      const text = raw.toString("utf8");
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(text);
+      } catch {
+        logger.warn({ text }, "ws: malformed json dropped");
+        return;
+      }
+      if (
+        parsed &&
+        typeof parsed === "object" &&
+        "type" in parsed &&
+        (parsed as { type: unknown }).type === "ping"
+      ) {
+        socket.send(JSON.stringify({ type: "pong" }));
+        return;
+      }
+      logger.debug({ parsed }, "ws: dropped unknown frame (chunk 2 placeholder)");
+    });
+
+    socket.on("close", () => {
+      logger.info("ws connection closed");
+    });
+
+    socket.on("error", (err) => {
+      logger.warn({ err }, "ws socket error");
+    });
+  });
+
+  return {
+    wss,
+    close: () => {
+      for (const client of wss.clients) {
+        if (client.readyState === WebSocket.OPEN) client.terminate();
+      }
+      wss.close();
+    },
+  };
+}
+```
+
+- [ ] **Step 4: Run the test and confirm it passes**
+
+Run:
+```bash
+pnpm --filter @agent-team/backend test
+```
+Expected: PASS — both ping/pong and malformed-tolerance cases green.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add packages/backend/src/ws/server.ts packages/backend/src/ws/server.test.ts
+git commit -m "feat(backend): add ws server with ping/pong echo"
+```
+
+### Task 13: `index.ts` entry point wires config + http + ws
+
+**Files:**
+- Modify: `packages/backend/src/index.ts`
+
+- [ ] **Step 1: Replace `src/index.ts` placeholder with the real entry**
+
+```ts
+import { loadConfig } from "./config.js";
+import { createHttpServer } from "./http/server.js";
+import { createLogger } from "./logger.js";
+import { attachWsServer } from "./ws/server.js";
+
+async function main(): Promise<void> {
+  const config = loadConfig();
+  const logger = createLogger(config.logLevel);
+
+  const http = await createHttpServer({
+    port: config.port,
+    logger,
+  });
+  attachWsServer({ httpServer: http.server, path: "/ws", logger });
+
+  const shutdown = async (signal: string) => {
+    logger.info({ signal }, "shutting down");
+    await http.close();
+    process.exit(0);
+  };
+  process.on("SIGINT", () => shutdown("SIGINT"));
+  process.on("SIGTERM", () => shutdown("SIGTERM"));
+}
+
+main().catch((err) => {
+  // Intentionally no logger here — config failure happens before logger exists.
+  // eslint-disable-next-line no-console
+  console.error(err);
+  process.exit(1);
+});
+```
+
+- [ ] **Step 2: Verify build**
+
+Run:
+```bash
+pnpm --filter @agent-team/backend build
+```
+Expected: exits 0.
+
+- [ ] **Step 3: Smoke-run the server end-to-end**
+
+Run (in one terminal):
+```bash
+cp -n .env.example .env
+# open .env and set ANTHROPIC_API_KEY=sk-ant-placeholder (any non-empty value is fine for chunk 2)
+pnpm --filter @agent-team/backend build && node packages/backend/dist/index.js &
+SERVER_PID=$!
+sleep 1
+curl -sf http://127.0.0.1:3001/health && echo
+curl -sf http://127.0.0.1:3001/metrics
+kill $SERVER_PID
+```
+Expected:
+- `curl /health` prints `{"ok":true,"version":"0.0.0"}`.
+- `curl /metrics` prints four lines starting with `active_sessions`, `ws_connections`, `total_turns`, `orphaned_turns`, all with value `0`.
+- No stack traces in server stderr.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add packages/backend/src/index.ts
+git commit -m "feat(backend): wire config + http + ws in entry point"
+```
+
+### Chunk 2 exit criteria
+
+All of the following must be true before starting Chunk 3:
+
+- `pnpm -r build` exits 0 from the repo root.
+- `pnpm -r test` passes across both `@agent-team/shared` and `@agent-team/backend`.
+- Running `node packages/backend/dist/index.js` binds to `127.0.0.1:3001`, returns `GET /health` and `GET /metrics` correctly, responds to WebSocket `{"type":"ping"}` with `{"type":"pong"}`, and shuts down cleanly on `SIGINT`.
+- `git log --oneline -10` shows the commits added in this chunk.
+
+---
+
+(Chunks 3 through 9 will be appended after Chunk 2 is reviewed and approved.)
