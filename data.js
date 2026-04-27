@@ -182,6 +182,7 @@ window.AppData = (() => {
       role: "system",
       ts: "09:46",
       kind: "approval",
+      approvalId: "a1",
       title: "Approval needed — Architecture trade-off",
       from: "domain-architect",
       body: "Should Payments confirm synchronously (lower throughput, simpler UX) or asynchronously via webhook + client poll (higher throughput, extra states)?",
@@ -408,12 +409,12 @@ window.AppData = (() => {
   };
 
   const approvals = [
-    { id: "a1", sessionId: "sess-lighthouse-01", title: "Architecture: sync vs async payment confirmation", from: "domain-architect", age: "3m", priority: "high", status: "pending" },
-    { id: "a2", sessionId: "sess-lighthouse-01", title: "Data: allow PII in analytics warehouse (masked)?", from: "risk-reviewer", age: "just now", priority: "high", status: "pending" },
-    { id: "a3", sessionId: "sess-lighthouse-01", title: "Tool use: call external FX rates API", from: "api-designer", age: "1m", priority: "med", status: "pending" },
-    { id: "a4", sessionId: "sess-lighthouse-01", title: "Budget: promote Redis to HA tier (+$240/mo)", from: "data-modeler", age: "5m", priority: "med", status: "pending" },
-    { id: "a5", sessionId: "sess-lighthouse-01", title: "Spec: include feature flag for gradual rollout", from: "tech-writer", age: "8m", priority: "low", status: "approved" },
-    { id: "a6", sessionId: "sess-lighthouse-01", title: "Doc: include ADR-0041 reference", from: "domain-architect", age: "12m", priority: "low", status: "approved" },
+    { id: "a1", sessionId: "sess-lighthouse-01", title: "Architecture: sync vs async payment confirmation", from: "domain-architect", age: "3m", priority: "high", status: "pending", chosen: null, decidedAt: null, messageId: "m5" },
+    { id: "a2", sessionId: "sess-lighthouse-01", title: "Data: allow PII in analytics warehouse (masked)?", from: "risk-reviewer", age: "just now", priority: "high", status: "pending", chosen: null, decidedAt: null, messageId: null },
+    { id: "a3", sessionId: "sess-lighthouse-01", title: "Tool use: call external FX rates API", from: "api-designer", age: "1m", priority: "med", status: "pending", chosen: null, decidedAt: null, messageId: null },
+    { id: "a4", sessionId: "sess-lighthouse-01", title: "Budget: promote Redis to HA tier (+$240/mo)", from: "data-modeler", age: "5m", priority: "med", status: "pending", chosen: null, decidedAt: null, messageId: null },
+    { id: "a5", sessionId: "sess-lighthouse-01", title: "Spec: include feature flag for gradual rollout", from: "tech-writer", age: "8m", priority: "low", status: "approved", chosen: null, decidedAt: null, messageId: null },
+    { id: "a6", sessionId: "sess-lighthouse-01", title: "Doc: include ADR-0041 reference", from: "domain-architect", age: "12m", priority: "low", status: "approved", chosen: null, decidedAt: null, messageId: null },
   ];
 
   const projects = [

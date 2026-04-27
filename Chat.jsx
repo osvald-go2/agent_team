@@ -80,13 +80,26 @@ function TeamProposalCard({ msg, agents, onRun }) {
   );
 }
 
-function ApprovalCard({ msg, agents, onDecide }) {
+function ApprovalCard({ msg, agents, onDecide, isAnchored, onAnchorClear }) {
   const fromAgent = agents.find(a => a.id === msg.from);
   const [chosen, setChosen] = React.useState(null);
   const [decided, setDecided] = React.useState(false);
-  const pick = (id) => { setChosen(id); setDecided(true); onDecide?.(id); };
+  const pick = (id) => {
+    setChosen(id); setDecided(true);
+    // 保留旧签名的同时把 approvalId 透传给上层（App 通过 msg.approvalId 找回 approvals）。
+    onDecide?.(id, msg.approvalId);
+  };
+  React.useEffect(() => {
+    if (!isAnchored) return;
+    const t = setTimeout(() => onAnchorClear && onAnchorClear(), 600);
+    return () => clearTimeout(t);
+  }, [isAnchored, onAnchorClear]);
+  const cls = "card approval-card"
+    + (decided ? " is-decided" : "")
+    + (isAnchored ? " is-anchored" : "");
+  const anchorAttr = msg.approvalId ? { "data-approval-id": msg.approvalId } : {};
   return (
-    <div className="card approval-card">
+    <div className={cls} {...anchorAttr}>
       <div className="card-head">
         <div className="title">
           <Icon name="flag" size={13} style={{ color: "var(--warn)" }} />
@@ -131,17 +144,28 @@ function ApprovalCard({ msg, agents, onDecide }) {
   );
 }
 
-function Message({ msg, agents, onSelectAgent, onDecide, onConfirmTeam, onStreamingDone, onBuildComplete }) {
+function Message({ msg, agents, onSelectAgent, onDecide, onConfirmTeam, onStreamingDone, onBuildComplete, onFocusTask, focusedApprovalId, onAnchorClear }) {
   const streaming = !!msg.streaming;
   const revealedChars = useTypewriter(msg.text || "", streaming, React.useCallback(() => {
     onStreamingDone && onStreamingDone(msg.id);
   }, [msg.id, onStreamingDone]));
 
+  if (msg.kind === "pulse" && window.PulseCard) {
+    return <window.PulseCard msg={msg} agents={agents} onSelectAgent={onSelectAgent} onFocusTask={onFocusTask} />;
+  }
   if (msg.kind === "team-proposal") {
     return <TeamProposalCard msg={msg} agents={agents} />;
   }
   if (msg.kind === "approval") {
-    return <ApprovalCard msg={msg} agents={agents} onDecide={onDecide} />;
+    return (
+      <ApprovalCard
+        msg={msg}
+        agents={agents}
+        onDecide={onDecide}
+        isAnchored={focusedApprovalId && msg.approvalId === focusedApprovalId}
+        onAnchorClear={onAnchorClear}
+      />
+    );
   }
   if (msg.kind === "agent-build" && window.AgentBuildCard) {
     return (
@@ -428,7 +452,7 @@ function WelcomeHero({ onStart, onPickTemplate, templates }) {
   );
 }
 
-function ChatArea({ onSelectAgent, conversation, agents, templates, forceEmpty, onExit, store, currentSessionId, onStartGuided, onConfirmTeam, onBuildComplete, guidedPhase }) {
+function ChatArea({ onSelectAgent, conversation, agents, templates, forceEmpty, onExit, store, currentSessionId, onStartGuided, onConfirmTeam, onBuildComplete, guidedPhase, tasks, approvals, onApprovalDecide, onFocusTask, onFocusApproval, focusedApprovalId, onAnchorClear }) {
   const [isEmpty, setIsEmpty] = React.useState(() => {
     if (forceEmpty !== undefined) return forceEmpty;
     try { return localStorage.getItem("at.chat.empty") === "1"; } catch { return false; }
@@ -536,19 +560,37 @@ function ChatArea({ onSelectAgent, conversation, agents, templates, forceEmpty, 
             onPickTemplate={handlePickTemplate}
           />
         ) : (
-          <div className="chat-thread">
-            {conversation.map(m => (
-              <Message
-                key={m.id}
-                msg={m}
+          <>
+            {window.PulseBar && (
+              <window.PulseBar
+                tasks={tasks}
+                agentThreads={window.AppData?.agentThreads}
+                approvals={approvals}
                 agents={agents}
+                currentSessionId={currentSessionId}
                 onSelectAgent={onSelectAgent}
-                onConfirmTeam={onConfirmTeam}
-                onBuildComplete={onBuildComplete}
-                onStreamingDone={handleStreamingDone}
+                onFocusTask={onFocusTask}
+                onFocusApproval={onFocusApproval}
               />
-            ))}
-          </div>
+            )}
+            <div className="chat-thread">
+              {conversation.map(m => (
+                <Message
+                  key={m.id}
+                  msg={m}
+                  agents={agents}
+                  onSelectAgent={onSelectAgent}
+                  onDecide={onApprovalDecide}
+                  onConfirmTeam={onConfirmTeam}
+                  onBuildComplete={onBuildComplete}
+                  onStreamingDone={handleStreamingDone}
+                  onFocusTask={onFocusTask}
+                  focusedApprovalId={focusedApprovalId}
+                  onAnchorClear={onAnchorClear}
+                />
+              ))}
+            </div>
+          </>
         )}
       </div>
       <Composer

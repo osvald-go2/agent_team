@@ -3375,3 +3375,202 @@ button[disabled], button:disabled {
 .editor-block .chip-opt {
   padding: 5px 10px; font-size: 12px; border-radius: 999px;
 }
+
+/* ————————————————————————————————
+   Activity Pulse — bar / card / popover
+   ———————————————————————————————— */
+
+:root {
+  --pulse-bg: color-mix(in oklch, var(--panel) 88%, transparent);
+  --pulse-h: 36px;
+  --pulse-ring-size: 18px;
+}
+
+.pulse-bar {
+  position: sticky; top: 0; z-index: 4;
+  display: flex; align-items: center; gap: 10px;
+  max-width: 820px; margin: 0 auto 14px;
+  min-height: var(--pulse-h);
+  padding: 0 12px;
+  background: var(--pulse-bg);
+  backdrop-filter: saturate(140%) blur(8px);
+  -webkit-backdrop-filter: saturate(140%) blur(8px);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  box-shadow: var(--shadow-sm);
+  font-size: 11.5px; color: var(--ink-2);
+  container-type: inline-size;
+  transition: transform var(--dur-fast) var(--ease-out), opacity var(--dur-fast) var(--ease-out);
+}
+.pulse-bar[data-collapsed="true"] { display: none; }
+.pulse-bar-sep { width: 1px; height: 14px; background: var(--line); flex: none; }
+
+.pulse-bar-progress {
+  display: inline-flex; align-items: center; gap: 6px;
+  background: transparent; border: 0; padding: 4px 4px 4px 2px;
+  border-radius: 999px; cursor: pointer; color: var(--ink-2);
+}
+.pulse-bar-progress:hover { background: var(--bg-sunken); color: var(--ink); }
+.pulse-ring { display: block; transform: rotate(-90deg); }
+.pulse-ring-track { fill: none; stroke: var(--line); stroke-width: 2; }
+.pulse-ring-fill {
+  fill: none; stroke: var(--accent); stroke-width: 2; stroke-linecap: round;
+  stroke-dasharray: var(--ring-c, 44);
+  stroke-dashoffset: var(--ring-off, 22);
+  transition: stroke-dashoffset var(--dur-base) var(--ease-out), stroke var(--dur-fast) var(--ease-std);
+}
+.pulse-bar-progress[data-state="all-done"] .pulse-ring-fill { stroke: var(--ok); }
+.pulse-bar-progress[data-state="warn"] .pulse-ring-fill { stroke: var(--warn); }
+.pulse-ring-label { font-size: 10.5px; color: var(--ink-3); font-family: var(--font-mono); }
+
+.pulse-bar-chip { padding: 3px 8px; }
+.pulse-bar-chip-n { color: var(--ink); font-weight: 500; font-family: var(--font-mono); }
+.pulse-bar-chip-l { color: var(--ink-3); }
+@container (max-width: 460px) { .pulse-bar-chip-l { display: none; } }
+@container (max-width: 360px) { .pulse-bar-activity, .pulse-bar-sep { display: none; } }
+.pulse-bar.is-compact .pulse-bar-chip-l { display: none; }
+.pulse-bar.is-narrow .pulse-bar-activity, .pulse-bar.is-narrow .pulse-bar-sep { display: none; }
+
+.pulse-bar-activity {
+  flex: 1 1 auto; min-width: 0;
+  display: inline-flex; align-items: center; gap: 8px;
+  background: transparent; border: 0; padding: 4px 6px; border-radius: 6px;
+  color: var(--ink-3); cursor: pointer; text-align: left; font: inherit;
+}
+.pulse-bar-activity:hover { background: var(--bg-sunken); color: var(--ink); }
+.pulse-bar-activity-ico { flex: none; display: inline-grid; place-items: center; }
+.pulse-bar-activity-track { position: relative; flex: 1 1 auto; min-width: 0; height: 18px; overflow: hidden; }
+.pulse-bar-activity-text {
+  position: absolute; inset: 0;
+  display: flex; align-items: center; gap: 6px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 11.5px;
+}
+.pulse-bar-activity-text b { color: var(--ink); font-weight: 600; }
+.pulse-bar-activity-text .mono { color: var(--violet); font-size: 11px; }
+.pulse-bar-activity-text.is-current { animation: pulse-act-in var(--dur-base) var(--ease-out); }
+.pulse-bar-activity-text.is-leaving { animation: pulse-act-out var(--dur-fast) var(--ease-in) forwards; }
+@keyframes pulse-act-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+@keyframes pulse-act-out { from { opacity: 1; transform: none; } to { opacity: 0; transform: translateY(-6px); } }
+
+.pulse-bar-bell {
+  position: relative;
+  width: 26px; height: 26px;
+  display: inline-grid; place-items: center;
+  background: transparent; border: 1px solid transparent; border-radius: 6px;
+  color: var(--ink-2); cursor: pointer;
+}
+.pulse-bar-bell:hover { background: var(--bg-sunken); color: var(--ink); border-color: var(--line); }
+.pulse-bar-bell[data-unread="0"] { color: var(--ink-4); }
+.pulse-bar-bell-badge {
+  position: absolute; top: 1px; right: 1px;
+  min-width: 14px; height: 14px; padding: 0 3px;
+  background: var(--danger); color: #fff;
+  border: 1.5px solid var(--panel); border-radius: 999px;
+  font-size: 9.5px; font-weight: 600; line-height: 1;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-family: var(--font-mono);
+}
+.pulse-bar-bell[data-unread="0"] .pulse-bar-bell-badge { display: none; }
+.pulse-bar-bell.is-shaking { animation: pulse-bell-shake 600ms var(--ease-out); }
+@keyframes pulse-bell-shake {
+  0%,100% { transform: none; }
+  20% { transform: rotate(-8deg); }
+  40% { transform: rotate(7deg); }
+  60% { transform: rotate(-4deg); }
+  80% { transform: rotate(3deg); }
+}
+
+.pulse-bar-collapse {
+  width: 22px; height: 22px;
+  display: inline-grid; place-items: center;
+  background: transparent; border: 0; border-radius: 5px;
+  color: var(--ink-3); cursor: pointer;
+  transition: transform var(--dur-fast) var(--ease-out), color var(--dur-micro);
+}
+.pulse-bar-collapse:hover { color: var(--ink); background: var(--bg-sunken); }
+.pulse-bar-pill {
+  position: absolute; top: 12px; right: 16px; z-index: 4;
+  height: 26px; padding: 0 10px;
+  display: inline-flex; align-items: center; gap: 6px;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 999px;
+  box-shadow: var(--shadow-sm); color: var(--ink-2); font-size: 11.5px;
+  cursor: pointer;
+  animation: fade-up var(--dur-fast) var(--ease-out);
+}
+.pulse-bar-pill:hover { border-color: var(--line-strong); color: var(--ink); }
+.pulse-bar-pill-bell { width: 6px; height: 6px; border-radius: 50%; background: var(--danger); }
+.pulse-bar-pill-bell[data-has-unread="false"] { display: none; }
+
+.pulse-card {
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 10px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-left-width: 3px;
+  border-radius: var(--radius);
+  font-size: 12px; color: var(--ink-2); line-height: 1.4;
+  transition: background var(--dur-micro) var(--ease-std), border-color var(--dur-micro) var(--ease-std);
+  animation: pulse-card-in var(--dur-base) var(--ease-out);
+}
+@keyframes pulse-card-in { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: none; } }
+.pulse-card:hover { background: var(--panel); border-color: var(--line-strong); }
+.pulse-card--done { border-left-color: var(--ok); }
+.pulse-card--running { border-left-color: var(--accent); }
+.pulse-card--awaiting { border-left-color: var(--warn); }
+.pulse-card--blocked { border-left-color: var(--danger); }
+.pulse-card + .pulse-card { margin-top: -8px; }
+
+.pulse-card-ico { flex: none; display: inline-grid; place-items: center; }
+.pulse-card-agent { display: inline-flex; align-items: center; gap: 5px; flex: none; }
+.pulse-card-agent-name { background: transparent; border: 0; padding: 0; cursor: pointer; font-weight: 600; color: var(--ink); font: inherit; }
+.pulse-card-agent-name:hover { text-decoration: underline; }
+.pulse-card-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pulse-card-task { background: transparent; border: 0; padding: 0; color: var(--ink-2); font: inherit; cursor: pointer; border-bottom: 1px dashed transparent; }
+.pulse-card-task:hover { color: var(--ink); border-bottom-color: var(--line-strong); }
+.pulse-card-count { flex: none; font-size: 10.5px; padding: 1px 5px; background: var(--bg-sunken); color: var(--ink-3); border-radius: 4px; font-family: var(--font-mono); }
+.pulse-card-spacer { flex: 1; }
+.pulse-card-ts { flex: none; font-size: 10.5px; color: var(--ink-4); font-family: var(--font-mono); }
+.pulse-card-view { flex: none; background: transparent; border: 0; padding: 0; color: var(--accent); font: inherit; font-size: 11.5px; cursor: pointer; display: inline-flex; align-items: center; gap: 3px; }
+.pulse-card-view:hover { text-decoration: underline; }
+@container (max-width: 460px) { .pulse-card-ts { display: none; } }
+
+.pulse-pop {
+  position: absolute; top: calc(100% + 6px);
+  min-width: 280px; max-width: min(360px, 90vw);
+  background: var(--panel); border: 1px solid var(--line-strong);
+  border-radius: var(--radius-lg); box-shadow: var(--shadow-lg);
+  z-index: 40; overflow: hidden;
+  animation: fade-up var(--dur-fast) var(--ease-out);
+}
+.pulse-pop-head { display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--line); font-size: 12.5px; font-weight: 600; color: var(--ink); }
+.pulse-pop-title { flex: 1; }
+.pulse-pop-close { width: 22px; height: 22px; display: grid; place-items: center; background: transparent; border: 0; border-radius: 5px; color: var(--ink-3); cursor: pointer; }
+.pulse-pop-close:hover { background: var(--bg-sunken); color: var(--ink); }
+.pulse-pop-list { list-style: none; margin: 0; padding: 4px 0; max-height: 320px; overflow-y: auto; }
+.pulse-pop-row { padding: 8px 12px; display: flex; align-items: center; gap: 10px; cursor: pointer; }
+.pulse-pop-row:hover, .pulse-pop-row:focus-visible { background: var(--bg-sunken); outline: none; }
+.pulse-pop-row-main { flex: 1; min-width: 0; }
+.pulse-pop-row-title { font-size: 12.5px; color: var(--ink); font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pulse-pop-row-meta { margin-top: 2px; display: inline-flex; align-items: center; gap: 6px; font-size: 11px; color: var(--ink-3); }
+.pulse-pop-row-meta .mono { font-size: 10.5px; color: var(--ink-4); }
+.pulse-pop-actions { display: flex; gap: 6px; flex: none; padding: 0 12px 10px; }
+.pulse-pop-empty { padding: 22px 12px; text-align: center; color: var(--ink-3); font-size: 12px; display: flex; flex-direction: column; align-items: center; gap: 8px; }
+
+.approval-card.is-anchored { animation: pulse-anchor 600ms var(--ease-out); }
+@keyframes pulse-anchor {
+  0% { box-shadow: var(--shadow), 0 0 0 0 color-mix(in oklch, var(--accent) 30%, transparent); }
+  50% { box-shadow: var(--shadow), 0 0 0 4px color-mix(in oklch, var(--accent) 24%, transparent); }
+  100% { box-shadow: var(--shadow), 0 0 0 0 transparent; }
+}
+.approval-card.is-decided { border-left-color: var(--ok); }
+.approval-card.is-decided .opt:not(.selected) { opacity: 0.55; pointer-events: none; }
+
+.kcard.is-anchored { animation: pulse-anchor 600ms var(--ease-out); }
+
+@media (prefers-reduced-motion: reduce) {
+  .pulse-bar-bell-badge, .pulse-bar-bell.is-shaking,
+  .pulse-bar-activity-text, .pulse-card,
+  .pulse-pop, .approval-card.is-anchored, .kcard.is-anchored {
+    animation: none !important; transition: none !important;
+  }
+}

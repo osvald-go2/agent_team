@@ -140,6 +140,9 @@ function App() {
 
   const [selectedAgentId, setSelectedAgentId] = React.useState(null);
   const [selectedTaskId, setSelectedTaskId] = React.useState(null);
+  // Pulse focus state — short-lived highlight markers cleared after the anchor animation.
+  const [focusedTaskId, setFocusedTaskId] = React.useState(null);
+  const [focusedApprovalId, setFocusedApprovalId] = React.useState(null);
   const [tweaksOpen, setTweaksOpen] = React.useState(false);
   // Guided session flow — owned here so both ChatArea and the right column can read it.
   // phase: "idle" | "clarify" | "building" | "confirm" | "done"
@@ -383,6 +386,102 @@ function App() {
     setGuided({ phase: "done", clarify: null });
   }, [appendMsg, store, currentSessionId, D.guidedAgentScript]);
 
+  // ——— Activity Pulse handlers ———
+  const handleApprovalDecide = React.useCallback((optionId, approvalId) => {
+    if (!approvalId) return;
+    store.update("approvals", approvalId, {
+      status: "approved",
+      chosen: optionId,
+      decidedAt: Date.now(),
+    });
+  }, [store]);
+
+  const handleFocusTask = React.useCallback((taskId) => {
+    if (!taskId) return;
+    setFocusedTaskId(taskId);
+    setSelectedTaskId(taskId);
+    setTimeout(() => setFocusedTaskId(null), 250);
+  }, []);
+
+  const handleFocusApproval = React.useCallback((approvalId) => {
+    if (!approvalId) return;
+    setFocusedApprovalId(approvalId);
+    // Defer so the highlight class is on when scroll happens.
+    requestAnimationFrame(() => {
+      const el = document.querySelector(`[data-approval-id="${approvalId}"]`);
+      if (el) el.scrollIntoView({ behavior: "smooth", block: "center" });
+    });
+  }, []);
+
+  const handleAnchorClear = React.useCallback(() => setFocusedApprovalId(null), []);
+
+  // Pulse watcher: diff task statuses on every store update; append a kind:"pulse" message
+  // when a task transitions, merging into the most-recent same-task pulse within 5 minutes.
+  const prevTaskStatusRef = React.useRef(null);
+  React.useEffect(() => {
+    const tasksList = store.state.tasks;
+    const snapshot = Object.create(null);
+    tasksList.forEach(t => { snapshot[t.id] = t.status; });
+
+    const prev = prevTaskStatusRef.current;
+    if (prev === null) {
+      prevTaskStatusRef.current = snapshot;
+      return;
+    }
+
+    const changes = [];
+    tasksList.forEach(t => {
+      if (prev[t.id] !== undefined && prev[t.id] !== t.status) {
+        changes.push(t);
+      }
+    });
+    prevTaskStatusRef.current = snapshot;
+    if (changes.length === 0) return;
+
+    const FIVE_MIN = 5 * 60 * 1000;
+    const STATUS_TO_PULSE = {
+      done: "task-done",
+      running: "task-started",
+      blocked: "task-blocked",
+      awaiting: "task-awaiting",
+    };
+
+    changes.forEach(task => {
+      const pulseKind = STATUS_TO_PULSE[task.status];
+      if (!pulseKind) return;
+      const sid = task.sessionId;
+      const now = Date.now();
+      // Look for the most-recent pulse for the same task in same session within 5 min.
+      const recent = [...store.state.conversation]
+        .reverse()
+        .find(m => m.kind === "pulse" && m.taskId === task.id && m.sessionId === sid);
+      if (recent && recent._tsAbs && (now - recent._tsAbs) < FIVE_MIN) {
+        store.update("conversation", recent.id, {
+          mergedCount: (recent.mergedCount || 1) + 1,
+          latestPulseKind: pulseKind,
+          _tsAbs: now,
+          ts: new Date(now).toTimeString().slice(0, 5),
+        });
+      } else {
+        const id = `pulse-${sid}-${task.id}-${now.toString(36)}`;
+        store.append("conversation", {
+          id,
+          sessionId: sid,
+          role: "system",
+          kind: "pulse",
+          pulseKind,
+          latestPulseKind: pulseKind,
+          taskId: task.id,
+          taskTitle: task.title,
+          agent: task.agent,
+          ts: new Date(now).toTimeString().slice(0, 5),
+          _tsAbs: now,
+          mergedCount: 1,
+        });
+      }
+    });
+  }, [store.state.tasks]); // eslint-disable-line — store reads are intentional
+
   const selectedAgent = selectedAgentId ? store.state.agents.find(a => a.id === selectedAgentId) : null;
   const selectedThread = (selectedAgentId && currentSessionId)
     ? (D.agentThreads[currentSessionId]?.[selectedAgentId] || [])
@@ -464,6 +563,13 @@ function App() {
               onConfirmTeam={confirmTeam}
               onBuildComplete={finishBuilding}
               guidedPhase={guided.phase}
+              tasks={slice.tasks}
+              approvals={slice.approvals}
+              onApprovalDecide={handleApprovalDecide}
+              onFocusTask={handleFocusTask}
+              onFocusApproval={handleFocusApproval}
+              focusedApprovalId={focusedApprovalId}
+              onAnchorClear={handleAnchorClear}
             />
           </main>
           {!rightCollapsed && (
