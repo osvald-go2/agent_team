@@ -1,0 +1,46 @@
+# Dependencies
+node_modules/
+packages/*/node_modules/
+
+# Build outputs and tool caches
+dist/
+build/
+.vite/
+packages/*/.vite/
+packages/*/dist/
+packages/*/build/
+coverage/
+.nyc_output/
+.cache/
+.turbo/
+.next/
+.parcel-cache/
+.playwright-cli/
+.claude/worktrees/
+
+# Runtime data
+packages/backend/data/*.db*
+packages/backend/workspaces/
+
+# Logs and local env
+*.log
+.env
+.env.*
+!.env.example
+packages/backend/.env
+packages/backend/.env.*
+!packages/backend/.env.example
+
+# Video renders and generated media
+video/**/renders/
+video/**/snapshots/
+**/video/**/renders/
+**/video/**/snapshots/
+*.mp4
+*.mov
+*.webm
+*.avi
+*.mkv
+
+# OS files
+.DS_Store

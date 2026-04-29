@@ -83,8 +83,9 @@ function Sidebar({ page, setPage, counts }) {
   );
 }
 
-function Topbar({ page, projectName, sessionName, projects, sessions, currentProjectId, onHome, onSwitchProject, onSwitchSession, onNewProject, onNewSession }) {
+function Topbar({ page, projectName, sessionName, sessionStatus, projects, sessions, currentProjectId, onHome, onSwitchProject, onSwitchSession, onNewProject, onNewSession }) {
   const showCrumb = page === "chat" && projectName && sessionName;
+  const teamState = sessionStatus || "draft";
   return (
     <header className="topbar">
       <div className="brand">
@@ -120,7 +121,7 @@ function Topbar({ page, projectName, sessionName, projects, sessions, currentPro
       <div className="spacer" />
       {page === "chat" && (
         <>
-          <span className="run-state"><span className="dot" /> team.running</span>
+          <span className="run-state"><span className="dot" /> team.{teamState}</span>
           <button className="ghost-btn"><Icon name="history" size={13} /> Run log</button>
           <button className="ghost-btn"><Icon name="download" size={13} /> Export</button>
           <button className="primary-btn" onClick={onNewSession}><Icon name="plus" size={13} /> New session</button>

@@ -214,6 +214,7 @@ function PulseBar({
 
   const current = activityItems[activeIndex];
   const currentAgent = current ? (agents || []).find(a => a.id === current.agentId) : null;
+  if (total === 0 && unread === 0 && activityItems.length === 0) return null;
 
   return (
     <div className={barClass} data-collapsed="false" role="region" aria-label="Activity pulse">

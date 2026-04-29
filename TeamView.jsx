@@ -154,9 +154,9 @@ function Canvas({ agents, topologies, onSelectAgent, selectedId }) {
     const a = toXY(fromId), b = toXY(toId);
     const shape = topo.shape;
     if (shape === "pipeline") {
-      // Horizontal; exit right, enter left
-      const x1 = a.x + CARD_W / 2, y1 = a.y;
-      const x2 = b.x - CARD_W / 2, y2 = b.y;
+      // Vertical pipeline: exit bottom, enter top.
+      const x1 = a.x, y1 = a.y + CARD_H / 2;
+      const x2 = b.x, y2 = b.y - CARD_H / 2;
       return `M ${x1} ${y1} L ${x2} ${y2}`;
     }
     if (shape === "tree") {
@@ -613,7 +613,7 @@ function ThreadCard({ task, agent, messages, draft, onDraft, onSend, onTerminate
 }
 
 function TeamView({ view, setView, agents, tasks, edges, nodePos, topologies,
-                   onSelectAgent, onSelectTask, selectedId, onCollapse, store, currentSessionId }) {
+                   onSelectAgent, onSelectTask, selectedId, onCollapse, focusPane, onFocusPane, store, currentSessionId }) {
   return (
     <div className="right">
       <div className="right-header">
@@ -634,6 +634,9 @@ function TeamView({ view, setView, agents, tasks, edges, nodePos, topologies,
         <span className="muted small" style={{ marginLeft: "auto", fontFamily: "var(--font-mono)", fontSize: 11 }}>
           {agents.length} agents · {tasks.length} tasks
         </span>
+        <button className="pane-focus-btn" onClick={() => onFocusPane?.("right")} title={focusPane === "right" ? "Exit team fullscreen" : "Fullscreen team panel"}>
+          <Icon name={focusPane === "right" ? "x" : "scan"} size={13} />
+        </button>
       </div>
       <div className="right-body">
         <div key={view} className="rightview-swap">

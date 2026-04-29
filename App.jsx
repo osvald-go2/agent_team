@@ -60,6 +60,8 @@ function Tweaks({ settings, setSettings }) {
 function App() {
   const D = window.AppData;
   const store = useEntityStore();
+  const storeRef = React.useRef(store);
+  React.useEffect(() => { storeRef.current = store; }, [store]);
   const [page, setPage] = React.useState(() => localStorage.getItem("at.page") || "chat");
   // Detail routing: { kind: 'agent' | 'skill' | 'kb' | 'template', id }
   const [detail, setDetail] = React.useState(null);
@@ -114,6 +116,27 @@ function App() {
     if (currentSessionId) localStorage.setItem("at.sessionId", currentSessionId);
     else localStorage.removeItem("at.sessionId");
   }, [currentSessionId]);
+  React.useEffect(() => {
+    if (!currentSessionId || !window.AgentTeamApi?.connect) return;
+    let closed = false;
+    let ws = null;
+    let retryTimer = null;
+    const connect = () => {
+      ws = window.AgentTeamApi.connect(currentSessionId, (event) => {
+        storeRef.current?.applyServerEvent?.(event);
+      });
+      ws.onclose = () => {
+        if (closed) return;
+        retryTimer = setTimeout(connect, 900);
+      };
+    };
+    connect();
+    return () => {
+      closed = true;
+      if (retryTimer) clearTimeout(retryTimer);
+      ws?.close();
+    };
+  }, [currentSessionId]);
 
   const switchSession = (sessionId, projectIdHint) => {
     if (!sessionId) return;
@@ -156,6 +179,7 @@ function App() {
     return Number.isFinite(v) ? v : 640;
   });
   const [rightCollapsed, setRightCollapsed] = React.useState(() => localStorage.getItem("at.rightCollapsed") === "1");
+  const [focusPane, setFocusPane] = React.useState(null); // null | "chat" | "right"
   const [dragging, setDragging] = React.useState(false);
   const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
     "theme": "light",
@@ -206,6 +230,10 @@ function App() {
   }, [dragging]);
 
   React.useEffect(() => {
+    if (page !== "chat") setFocusPane(null);
+  }, [page]);
+
+  React.useEffect(() => {
     const onMsg = (e) => {
       if (e.data?.type === "__activate_edit_mode") setTweaksOpen(true);
       if (e.data?.type === "__deactivate_edit_mode") setTweaksOpen(false);
@@ -220,6 +248,40 @@ function App() {
   const persistSettings = (next) => {
     setSettings(next);
     window.parent.postMessage({ type: "__edit_mode_set_keys", edits: next }, "*");
+  };
+
+  const chatModelOptions = ((D.modelsByProvider || {}).Codex || []).length
+    ? (D.modelsByProvider || {}).Codex
+    : [window.AppData?.runtime?.model || "gpt-5.5"];
+  const runtimeDefaultModel = window.AppData?.runtime?.model || chatModelOptions[0] || "gpt-5.5";
+  const currentSession = store.state.sessions.find(s => s.id === currentSessionId) || null;
+  const [chatModelBySession, setChatModelBySession] = React.useState({});
+  const currentChatModel = chatModelBySession[currentSessionId] || currentSession?.model || runtimeDefaultModel;
+  const setCurrentChatModel = React.useCallback((model) => {
+    if (!currentSessionId || !model) return;
+    setChatModelBySession(s => ({ ...s, [currentSessionId]: model }));
+  }, [currentSessionId]);
+  const rememberCurrentSessionModel = React.useCallback((model) => {
+    if (!currentSessionId || !model) return;
+    setChatModelBySession(s => ({ ...s, [currentSessionId]: model }));
+    const sess = storeRef.current?.state.sessions.find(x => x.id === currentSessionId);
+    if (sess && sess.model !== model) storeRef.current.update("sessions", currentSessionId, { model });
+  }, [currentSessionId]);
+  const createNewSession = () => {
+    let projectId = currentProjectId;
+    if (!projectId) {
+      const active = store.state.projects.find(p => p.status !== "archived");
+      if (active) {
+        projectId = active.id;
+      } else {
+        const created = store.createProject({ name: "Untitled project" });
+        switchSession(created.sessionId, created.projectId);
+        return created.sessionId;
+      }
+    }
+    const id = store.createSession(projectId, {});
+    switchSession(id, projectId);
+    return id;
   };
 
   const slice = sliceBySession(D, store, currentSessionId);
@@ -374,6 +436,14 @@ function App() {
         agent: "prd-analyst",
         text: `已分配 ${D.guidedAgentScript.length} 条任务，右侧切换到看板查看进度。`,
       });
+      const recentGoal = store.state.conversation
+        .filter(m => m.sessionId === currentSessionId && m.role === "user" && m.text)
+        .slice(-3)
+        .map(m => m.text)
+        .join("\n");
+      rememberCurrentSessionModel(currentChatModel);
+      window.AgentTeamApi?.startRun?.(currentSessionId, recentGoal || "Run the confirmed AgentTeam plan.", currentChatModel)
+        .catch(err => console.warn("AgentTeam run failed to start", err));
       setRightView("kanban");
       setRightCollapsed(false);
     } else {
@@ -384,7 +454,7 @@ function App() {
       });
     }
     setGuided({ phase: "done", clarify: null });
-  }, [appendMsg, store, currentSessionId, D.guidedAgentScript]);
+  }, [appendMsg, store, currentSessionId, D.guidedAgentScript, currentChatModel, rememberCurrentSessionModel]);
 
   // ——— Activity Pulse handlers ———
   const handleApprovalDecide = React.useCallback((optionId, approvalId) => {
@@ -492,7 +562,11 @@ function App() {
   const closeTaskDrawer = React.useCallback(() => setSelectedTaskId(null), []);
 
   const densityClass = "app-density-" + settings.density;
-  const appClass = "app " + (settings.density !== "default" ? densityClass : "") + (page === "chat" && rightCollapsed ? " right-collapsed" : "");
+  const focusClass = page === "chat" && focusPane ? " focus-" + focusPane : "";
+  const appClass = "app "
+    + (settings.density !== "default" ? densityClass : "")
+    + (page === "chat" && rightCollapsed && !focusPane ? " right-collapsed" : "")
+    + focusClass;
   const appStyle = page === "chat" && !rightCollapsed ? { "--right-w": rightW + "px" } : undefined;
 
   // Dashboard is full-bleed: render outside the app grid (no Sidebar, no Topbar).
@@ -537,7 +611,8 @@ function App() {
       <Topbar
         page={page}
         projectName={(store.state.projects.find(p => p.id === currentProjectId) || {}).name}
-        sessionName={(store.state.sessions.find(s => s.id === currentSessionId) || {}).name}
+        sessionName={currentSession?.name}
+        sessionStatus={currentSession?.status}
         projects={store.state.projects}
         sessions={store.state.sessions}
         currentProjectId={currentProjectId}
@@ -545,12 +620,13 @@ function App() {
         onSwitchProject={switchProject}
         onSwitchSession={switchSession}
         onNewProject={() => { setPage("dashboard"); }}
-        onNewSession={() => { if (currentProjectId) { const id = store.createSession(currentProjectId, {}); switchSession(id); } }}
+        onNewSession={createNewSession}
       />
       <Sidebar page={page} setPage={setPage} counts={{ approvals: approvalsCount, sessions: sessionsCount }} />
 
       {page === "chat" && (
         <>
+          {focusPane !== "right" && (
           <main className="main" data-screen-label="01 Main Chat">
             <ChatArea
               onSelectAgent={setSelectedAgentId}
@@ -559,6 +635,13 @@ function App() {
               templates={D.templates}
               store={store}
               currentSessionId={currentSessionId}
+              sessionName={currentSession?.name}
+              onRenameSession={(name) => currentSessionId && store.renameSession(currentSessionId, name)}
+              onNewSession={createNewSession}
+              modelOptions={chatModelOptions}
+              model={currentChatModel}
+              onModelChange={setCurrentChatModel}
+              onModelUsed={rememberCurrentSessionModel}
               onStartGuided={startGuided}
               onConfirmTeam={confirmTeam}
               onBuildComplete={finishBuilding}
@@ -570,18 +653,23 @@ function App() {
               onFocusApproval={handleFocusApproval}
               focusedApprovalId={focusedApprovalId}
               onAnchorClear={handleAnchorClear}
+              focusPane={focusPane}
+              onFocusPane={(pane) => setFocusPane(cur => cur === pane ? null : pane)}
             />
           </main>
-          {!rightCollapsed && (
+          )}
+          {!rightCollapsed && focusPane !== "chat" && (
             <>
-              <div
-                className={"resizer " + (dragging ? "dragging" : "")}
-                onMouseDown={(e) => { e.preventDefault(); setDragging(true); }}
-                onDoubleClick={() => setRightW(640)}
-                title="Drag to resize · double-click to reset"
-              >
-                <div className="grip"><Icon name="dots" size={12} style={{ transform: "rotate(90deg)" }} /></div>
-              </div>
+              {!focusPane && (
+                <div
+                  className={"resizer " + (dragging ? "dragging" : "")}
+                  onMouseDown={(e) => { e.preventDefault(); setDragging(true); }}
+                  onDoubleClick={() => setRightW(640)}
+                  title="Drag to resize · double-click to reset"
+                >
+                  <div className="grip"><Icon name="dots" size={12} style={{ transform: "rotate(90deg)" }} /></div>
+                </div>
+              )}
               {guided.phase === "clarify" ? (
                 <ClarifyPanel
                   questions={D.clarifyQuestions}
@@ -600,14 +688,19 @@ function App() {
                   onSelectAgent={setSelectedAgentId}
                   onSelectTask={setSelectedTaskId}
                   selectedId={selectedAgentId}
-                  onCollapse={() => setRightCollapsed(true)}
+                  onCollapse={() => { setFocusPane(null); setRightCollapsed(true); }}
+                  focusPane={focusPane}
+                  onFocusPane={(pane) => {
+                    setRightCollapsed(false);
+                    setFocusPane(cur => cur === pane ? null : pane);
+                  }}
                   store={store}
                   currentSessionId={currentSessionId}
                 />
               )}
             </>
           )}
-          {rightCollapsed && (
+          {rightCollapsed && !focusPane && (
             <aside className="right-collapsed-rail">
               <button title="Expand team panel" onClick={() => setRightCollapsed(false)}>
                 <Icon name="arrow" size={13} style={{ transform: "scaleX(-1)" }} />

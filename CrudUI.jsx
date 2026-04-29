@@ -7,6 +7,8 @@
  */
 function useEntityStore() {
   const D = window.AppData;
+  const api = window.AgentTeamApi;
+  const entityKeys = ["agents", "skills", "knowledge", "templates", "projects", "sessions", "approvals", "tasks", "conversation"];
   const [state, setState] = React.useState(() => ({
     agents:       [...D.agents],
     skills:       [...D.skills],
@@ -19,120 +21,173 @@ function useEntityStore() {
     conversation: [...D.conversation],
   }));
 
-  const create = React.useCallback((key, item) => {
-    setState(s => {
-      const id = item.id || `${key.slice(0, 2)}-${Date.now().toString(36)}`;
-      return { ...s, [key]: [{ ...item, id }, ...s[key]] };
-    });
+  const persistCreate = React.useCallback((key, item) => {
+    api?.createEntity?.(key, item).catch(err => console.warn("AgentTeam create failed", key, err));
+  }, [api]);
+  const persistUpdate = React.useCallback((key, id, patch) => {
+    api?.updateEntity?.(key, id, patch).catch(err => console.warn("AgentTeam update failed", key, err));
+  }, [api]);
+  const persistDelete = React.useCallback((key, id) => {
+    api?.deleteEntity?.(key, id).catch(err => console.warn("AgentTeam delete failed", key, err));
+  }, [api]);
+
+  React.useEffect(() => {
+    let cancelled = false;
+    api?.bootstrap?.()
+      .then((payload) => {
+        if (cancelled || !payload?.entities) return;
+        Object.assign(window.AppData, payload.entities);
+        if (payload.runtime) window.AppData.runtime = payload.runtime;
+        setState(s => {
+          const next = { ...s };
+          entityKeys.forEach(k => {
+            if (Array.isArray(payload.entities[k])) next[k] = payload.entities[k];
+          });
+          return next;
+        });
+      })
+      .catch(err => console.warn("AgentTeam backend unavailable; using mock data", err));
+    return () => { cancelled = true; };
   }, []);
+
+  const create = React.useCallback((key, item) => {
+    const id = item.id || `${key.slice(0, 2)}-${Date.now().toString(36)}`;
+    const record = { ...item, id };
+    setState(s => {
+      return { ...s, [key]: [record, ...s[key]] };
+    });
+    persistCreate(key, record);
+    return record.id;
+  }, [persistCreate]);
 
   // Append-only variant for chronological collections (e.g. conversation):
   // `create` prepends, which puts new chat messages at the top of the thread.
   const append = React.useCallback((key, item) => {
+    const id = item.id || `${key.slice(0, 2)}-${Date.now().toString(36)}`;
+    const record = { ...item, id };
     setState(s => {
-      const id = item.id || `${key.slice(0, 2)}-${Date.now().toString(36)}`;
-      return { ...s, [key]: [...s[key], { ...item, id }] };
+      return { ...s, [key]: [...s[key], record] };
     });
-  }, []);
+    persistCreate(key, record);
+    return record.id;
+  }, [persistCreate]);
 
   const update = React.useCallback((key, id, patch) => {
     setState(s => ({ ...s, [key]: s[key].map(x => x.id === id ? { ...x, ...patch } : x) }));
-  }, []);
+    persistUpdate(key, id, patch);
+  }, [persistUpdate]);
 
   const remove = React.useCallback((key, id) => {
     setState(s => ({ ...s, [key]: s[key].filter(x => x.id !== id) }));
-  }, []);
+    persistDelete(key, id);
+  }, [persistDelete]);
 
   const duplicate = React.useCallback((key, id) => {
+    let copy;
     setState(s => {
       const src = s[key].find(x => x.id === id);
       if (!src) return s;
-      const copy = { ...src, id: `${key.slice(0, 2)}-${Date.now().toString(36)}`, name: (src.name || src.title || "Copy") + " (copy)" };
+      copy = { ...src, id: `${key.slice(0, 2)}-${Date.now().toString(36)}`, name: (src.name || src.title || "Copy") + " (copy)" };
       const idx = s[key].findIndex(x => x.id === id);
       const next = [...s[key]];
       next.splice(idx + 1, 0, copy);
       return { ...s, [key]: next };
     });
-  }, []);
+    setTimeout(() => copy && persistCreate(key, copy), 0);
+  }, [persistCreate]);
 
-  const createProject = React.useCallback(({ name, description, defaultTemplateId, icon, color }) => {
+  const createProject = React.useCallback(({ name, description, defaultTemplateId, icon, color, model }) => {
     const projectId = `proj-${Date.now().toString(36)}`;
     const sessionId = `sess-${Date.now().toString(36)}`;
     const now = "Now";
+    const project = {
+      id: projectId,
+      name: name || "Untitled project",
+      description: description || "",
+      icon: icon || "folder",
+      color: color || "oklch(0.72 0.13 80)",
+      defaultTemplateId: defaultTemplateId || null,
+      status: "active",
+      created: now,
+      lastActive: now,
+      env: { roots: [], configs: [] },
+    };
+    const session = {
+      id: sessionId,
+      projectId,
+      name: `${name || "Untitled"} · Session 1`,
+      status: "draft",
+      agents: 0, turns: 0, duration: "0m", when: now,
+      createdBy: "Lin Chen",
+    };
+    if (model) session.model = model;
+    const message = { id: `msg-${sessionId}-0`, sessionId, role: "system", text: "Team ready — describe what you want to work on." };
     setState(s => ({
       ...s,
-      projects: [
-        {
-          id: projectId,
-          name: name || "Untitled project",
-          description: description || "",
-          icon: icon || "folder",
-          color: color || "oklch(0.72 0.13 80)",
-          defaultTemplateId: defaultTemplateId || null,
-          status: "active",
-          created: now,
-          lastActive: now,
-        },
-        ...s.projects,
-      ],
-      sessions: [
-        {
-          id: sessionId,
-          projectId,
-          name: `${name || "Untitled"} · Session 1`,
-          status: "draft",
-          agents: 0, turns: 0, duration: "0m", when: now,
-          createdBy: "Lin Chen",
-        },
-        ...s.sessions,
-      ],
-      conversation: [
-        { id: `msg-${sessionId}-0`, sessionId, role: "system", text: "Team ready — describe what you want to work on." },
-        ...s.conversation,
-      ],
+      projects: [project, ...s.projects],
+      sessions: [session, ...s.sessions],
+      conversation: [message, ...s.conversation],
     }));
+    persistCreate("projects", project);
+    persistCreate("sessions", session);
+    persistCreate("conversation", message);
     return { projectId, sessionId };
-  }, []);
+  }, [persistCreate]);
 
-  const createSession = React.useCallback((projectId, { name } = {}) => {
+  const createSession = React.useCallback((projectId, { name, model } = {}) => {
     const sessionId = `sess-${Date.now().toString(36)}`;
     const now = "Now";
+    const session = {
+      id: sessionId,
+      projectId,
+      name: name || "New session",
+      status: "draft",
+      agents: 0, turns: 0, duration: "0m", when: now,
+      createdBy: "Lin Chen",
+    };
+    if (model) session.model = model;
+    const message = { id: `msg-${sessionId}-0`, sessionId, role: "system", text: "Team ready — describe what you want to work on." };
     setState(s => ({
       ...s,
-      sessions: [
-        {
-          id: sessionId,
-          projectId,
-          name: name || "New session",
-          status: "draft",
-          agents: 0, turns: 0, duration: "0m", when: now,
-          createdBy: "Lin Chen",
-        },
-        ...s.sessions,
-      ],
-      conversation: [
-        { id: `msg-${sessionId}-0`, sessionId, role: "system", text: "Team ready — describe what you want to work on." },
-        ...s.conversation,
-      ],
+      sessions: [session, ...s.sessions],
+      conversation: [message, ...s.conversation],
     }));
+    persistCreate("sessions", session);
+    persistCreate("conversation", message);
     return sessionId;
-  }, []);
+  }, [persistCreate]);
 
   const archiveProject = React.useCallback((id) => {
     setState(s => ({ ...s, projects: s.projects.map(p => p.id === id ? { ...p, status: "archived" } : p) }));
-  }, []);
+    persistUpdate("projects", id, { status: "archived" });
+  }, [persistUpdate]);
 
   const archiveSession = React.useCallback((id) => {
     setState(s => ({ ...s, sessions: s.sessions.map(x => x.id === id ? { ...x, status: "archived" } : x) }));
-  }, []);
+    persistUpdate("sessions", id, { status: "archived" });
+  }, [persistUpdate]);
 
   const renameProject = React.useCallback((id, name) => {
     setState(s => ({ ...s, projects: s.projects.map(p => p.id === id ? { ...p, name } : p) }));
-  }, []);
+    persistUpdate("projects", id, { name });
+  }, [persistUpdate]);
 
   const renameSession = React.useCallback((id, name) => {
-    setState(s => ({ ...s, sessions: s.sessions.map(x => x.id === id ? { ...x, name } : x) }));
-  }, []);
+    let nextRecord = null;
+    setState(s => ({
+      ...s,
+      sessions: s.sessions.map(x => {
+        if (x.id !== id) return x;
+        nextRecord = { ...x, name };
+        return nextRecord;
+      }),
+    }));
+    setTimeout(() => {
+      if (!nextRecord || !api?.updateEntity) return;
+      api.updateEntity("sessions", id, { name })
+        .catch(() => api.createEntity?.("sessions", nextRecord));
+    }, 0);
+  }, [api]);
 
   const deleteSession = React.useCallback((id) => {
     setState(s => ({
@@ -144,11 +199,13 @@ function useEntityStore() {
     }));
     // Note: D.edges, D.nodePos, D.agentThreads are read-only (live on window.AppData, not store).
     // Mutating them is out of scope for this prototype; stale entries are acceptable.
-  }, []);
+    persistDelete("sessions", id);
+  }, [persistDelete]);
 
   const deleteProject = React.useCallback((id) => {
+    let doomedSessionIds = [];
     setState(s => {
-      const doomedSessionIds = s.sessions.filter(x => x.projectId === id).map(x => x.id);
+      doomedSessionIds = s.sessions.filter(x => x.projectId === id).map(x => x.id);
       const doomed = new Set(doomedSessionIds);
       return {
         ...s,
@@ -159,7 +216,71 @@ function useEntityStore() {
         approvals:    s.approvals.filter(a => !doomed.has(a.sessionId)),
       };
     });
-  }, []);
+    persistDelete("projects", id);
+    doomedSessionIds.forEach(sessionId => persistDelete("sessions", sessionId));
+  }, [persistDelete]);
+
+  const applyServerEvent = React.useCallback((event) => {
+    if (!event) return;
+    if (event.type === "agent.output.delta" && event.agentId && event.taskId) {
+      const threads = window.AppData.agentThreads || (window.AppData.agentThreads = {});
+      const sessionThreads = threads[event.sessionId] || (threads[event.sessionId] = {});
+      const thread = sessionThreads[event.agentId] || (sessionThreads[event.agentId] = []);
+      const last = thread[thread.length - 1];
+      if (last?.taskId === event.taskId && last.role === "agent") {
+        last.text = (last.text || "") + (event.delta || "");
+      } else {
+        thread.push({ role: "agent", taskId: event.taskId, text: event.delta || "" });
+      }
+      setState(s => ({ ...s }));
+    }
+    if (event.type === "agent.output.delta" && event.messageId) {
+      setState(s => ({
+        ...s,
+        conversation: s.conversation.map(m => m.id === event.messageId ? { ...m, text: (m.text || "") + (event.delta || ""), streaming: true } : m),
+      }));
+      return;
+    }
+    if (event.type === "message.created" && event.message) {
+      setState(s => {
+        const exists = s.conversation.some(m => m.id === event.message.id);
+        return {
+          ...s,
+          conversation: exists
+            ? s.conversation.map(m => m.id === event.message.id ? event.message : m)
+            : [...s.conversation, event.message],
+        };
+      });
+      return;
+    }
+    if (event.type?.startsWith("task.") && event.task) {
+      const uiStatus = ({ ready: "queued", blocked: "awaiting", failed: "awaiting" })[event.task.status] || event.task.status;
+      const task = { ...event.task, rawStatus: event.task.status, status: uiStatus, agent: event.task.agent || event.task.agentId, activity: event.task.error || event.task.title };
+      setState(s => {
+        const exists = s.tasks.some(t => t.id === task.id);
+        return {
+          ...s,
+          tasks: exists ? s.tasks.map(t => t.id === task.id ? { ...t, ...task } : t) : [...s.tasks, task],
+        };
+      });
+      return;
+    }
+    if (event.type !== "entity.changed" || !event.kind || !state[event.kind]) return;
+    setState(s => {
+      if (!s[event.kind]) return s;
+      if (event.action === "delete") {
+        return { ...s, [event.kind]: s[event.kind].filter(x => x.id !== event.id) };
+      }
+      if (!event.record) return s;
+      const exists = s[event.kind].some(x => x.id === event.record.id);
+      return {
+        ...s,
+        [event.kind]: exists
+          ? s[event.kind].map(x => x.id === event.record.id ? event.record : x)
+          : [...s[event.kind], event.record],
+      };
+    });
+  }, [state]);
 
   return {
     state, create, append, update, remove, duplicate,
@@ -167,6 +288,7 @@ function useEntityStore() {
     archiveProject, archiveSession,
     renameProject, renameSession,
     deleteProject, deleteSession,
+    applyServerEvent,
   };
 }
 

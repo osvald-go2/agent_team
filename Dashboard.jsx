@@ -1,5 +1,5 @@
-// Dashboard — Image 8 style landing.
-// Layout: left sidebar (brand + NewProjectForm + foot chips) | right main (tabs + search + grid).
+// Dashboard — project landing.
+// Layout: left sidebar (brand + NewProjectForm + foot chips) | right main (quick start + project grid).
 
 const QUICKSTART_PRESETS = [
   { id: "qs-prd",     name: "PRD → Technical Design",   icon: "doc-code", defaultTemplateId: "tpl-prd2tech", description: "Parse a PRD and produce the full technical design.",
@@ -130,13 +130,18 @@ function FolderGlyph() {
 
 function ProjectCard({ project, sessionCount, onOpen }) {
   const tint = project.color || swatchFor(project.id);
+  const iconName = project.icon || "folder";
   return (
     <button className="rp-card" onClick={() => onOpen(project.id)} style={{ "--tint": tint }}>
       <div className="rp-folder">
-        <FolderGlyph />
+        <Icon name={iconName} size={20} />
       </div>
       <div className="rp-meta">
-        <div className="rp-name">{project.name}</div>
+        <div className="rp-name-row">
+          <div className="rp-name">{project.name}</div>
+          <span className="rp-arrow"><Icon name="arrow" size={13} /></span>
+        </div>
+        {project.description && <div className="rp-desc">{project.description}</div>}
         <div className="rp-sub">{sessionCount} {sessionCount === 1 ? "session" : "sessions"} · {project.lastActive || "just now"}</div>
       </div>
     </button>
@@ -189,6 +194,10 @@ function QuickStartStrip({ presets, title, sub, onPick }) {
 function DashboardMain({ projects, sessionsByProject, onOpenProject, onQuickstart }) {
   const [tab, setTab] = React.useState("recent"); // recent | all | archived
   const [query, setQuery] = React.useState("");
+  const activeCount = React.useMemo(() => projects.filter(p => p.status !== "archived").length, [projects]);
+  const sessionCount = React.useMemo(() => (
+    Object.values(sessionsByProject).reduce((sum, sessions) => sum + sessions.length, 0)
+  ), [sessionsByProject]);
 
   const list = React.useMemo(() => {
     const active = projects.filter(p => p.status !== "archived");
@@ -203,38 +212,52 @@ function DashboardMain({ projects, sessionsByProject, onOpenProject, onQuickstar
 
   return (
     <main className="ds-main">
-      <QuickStartStrip
-        presets={QUICKSTART_PRESETS}
-        title="Quick start"
-        sub="Spin up a ready-made team in one click"
-        onPick={onQuickstart}
-      />
-      <div className="ds-main-head">
-        <div className="ds-main-tabs">
-          {[["recent","Recent"], ["all","All"], ["archived","Archived"]].map(([k,l]) => (
-            <button key={k} className={"ds-main-tab " + (tab===k ? "active" : "")} onClick={() => setTab(k)}>{l}</button>
-          ))}
-        </div>
-        <div className="ds-main-search">
-          <Icon name="search" size={13} />
-          <input placeholder="Search…" value={query} onChange={e => setQuery(e.target.value)} />
-        </div>
-      </div>
+      <div className="ds-main-shell">
+        <header className="ds-titlebar">
+          <div>
+            <div className="ds-kicker">Workspace</div>
+            <h1>Projects</h1>
+          </div>
+          <div className="ds-metrics" aria-label="Project summary">
+            <span><strong>{activeCount}</strong> active</span>
+            <span><strong>{sessionCount}</strong> sessions</span>
+            <span><strong>{QUICKSTART_PRESETS.length}</strong> presets</span>
+          </div>
+        </header>
 
-      {list.length === 0 ? (
-        <div className="rp-empty">Nothing here yet.</div>
-      ) : (
-        <div className="rp-grid">
-          {list.map(p => (
-            <ProjectCard
-              key={p.id}
-              project={p}
-              sessionCount={(sessionsByProject[p.id] || []).length}
-              onOpen={onOpenProject}
-            />
-          ))}
+        <QuickStartStrip
+          presets={QUICKSTART_PRESETS}
+          title="Quick start"
+          sub="Ready-made team presets"
+          onPick={onQuickstart}
+        />
+        <div className="ds-main-head">
+          <div className="ds-main-tabs">
+            {[["recent","Recent"], ["all","All"], ["archived","Archived"]].map(([k,l]) => (
+              <button key={k} className={"ds-main-tab " + (tab===k ? "active" : "")} onClick={() => setTab(k)}>{l}</button>
+            ))}
+          </div>
+          <div className="ds-main-search">
+            <Icon name="search" size={13} />
+            <input placeholder="Search…" value={query} onChange={e => setQuery(e.target.value)} />
+          </div>
         </div>
-      )}
+
+        {list.length === 0 ? (
+          <div className="rp-empty">Nothing here yet.</div>
+        ) : (
+          <div className="rp-grid">
+            {list.map(p => (
+              <ProjectCard
+                key={p.id}
+                project={p}
+                sessionCount={(sessionsByProject[p.id] || []).length}
+                onOpen={onOpenProject}
+              />
+            ))}
+          </div>
+        )}
+      </div>
     </main>
   );
 }

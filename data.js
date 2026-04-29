@@ -5,10 +5,12 @@ window.AppData = (() => {
   const providers = [
     { value: "Claude", label: "Claude" },
     { value: "Codex",  label: "Codex (OpenAI)" },
+    { value: "codexcli", label: "Codex CLI" },
   ];
   const modelsByProvider = {
     Claude: ["claude-opus-4-7", "claude-sonnet-4-6", "claude-haiku-4-5"],
-    Codex:  ["gpt-5-4", "gpt-5", "gpt-4o"],
+    Codex:  ["gpt-5.5", "gpt-5-4", "gpt-5", "gpt-4o"],
+    codexcli: ["gpt-5.5"],
   };
 
   const agents = [
@@ -132,12 +134,12 @@ window.AppData = (() => {
   ];
 
   const templates = [
-    { id: "tpl-prd2tech", name: "PRD → Technical Design", desc: "Parse a PRD and produce a full technical design doc with arch, API and data design.", agents: 6, runs: 238, tags: ["engineering", "planning"] },
-    { id: "tpl-bugfix", name: "Bug Triage & Fix", desc: "Reproduce, root-cause, patch and write a post-mortem.", agents: 4, runs: 512, tags: ["engineering"] },
-    { id: "tpl-research", name: "Market & Competitor Research", desc: "Collect, synthesize and compare competitors on key dimensions.", agents: 5, runs: 88, tags: ["research"] },
-    { id: "tpl-launch", name: "Launch Readiness", desc: "Go-to-market checklist, risk review and launch comms pack.", agents: 4, runs: 64, tags: ["product"] },
-    { id: "tpl-review", name: "Code Review Council", desc: "Multi-angle review: correctness, perf, security, style.", agents: 4, runs: 174, tags: ["engineering"] },
-    { id: "tpl-data", name: "Data Analysis Report", desc: "From question to chart-backed report with caveats.", agents: 3, runs: 96, tags: ["data"] },
+    { id: "tpl-prd2tech", name: "PRD → Technical Design", desc: "Parse a PRD and produce a full technical design doc with arch, API and data design.", agents: 6, runs: 0, tags: ["engineering", "planning"] },
+    { id: "tpl-bugfix", name: "Bug Triage & Fix", desc: "Reproduce, root-cause, patch and write a post-mortem.", agents: 4, runs: 0, tags: ["engineering"] },
+    { id: "tpl-research", name: "Market & Competitor Research", desc: "Collect, synthesize and compare competitors on key dimensions.", agents: 5, runs: 0, tags: ["research"] },
+    { id: "tpl-launch", name: "Launch Readiness", desc: "Go-to-market checklist, risk review and launch comms pack.", agents: 4, runs: 0, tags: ["product"] },
+    { id: "tpl-review", name: "Code Review Council", desc: "Multi-angle review: correctness, perf, security, style.", agents: 4, runs: 0, tags: ["engineering"] },
+    { id: "tpl-data", name: "Data Analysis Report", desc: "From question to chart-backed report with caveats.", agents: 3, runs: 0, tags: ["data"] },
   ];
 
   // Conversation in main chat — drives the story of a running PRD→Tech session.
@@ -327,15 +329,15 @@ window.AppData = (() => {
     sequential: {
       id: "sequential",
       name: "Sequential Pipeline",
-      subtitle: "Left→right hand-off",
+      subtitle: "Top→bottom hand-off",
       shape: "pipeline",
       nodes: {
-        "prd-analyst":      { x: 8,  y: 50, role: "Stage 1" },
-        "domain-architect": { x: 26, y: 50, role: "Stage 2" },
-        "data-modeler":     { x: 44, y: 50, role: "Stage 3" },
-        "api-designer":     { x: 62, y: 50, role: "Stage 4" },
-        "risk-reviewer":    { x: 80, y: 50, role: "Stage 5" },
-        "tech-writer":      { x: 94, y: 50, role: "Sink" },
+        "prd-analyst":      { x: 50, y: 18, role: "Stage 1" },
+        "domain-architect": { x: 50, y: 31, role: "Stage 2" },
+        "data-modeler":     { x: 50, y: 44, role: "Stage 3" },
+        "api-designer":     { x: 50, y: 57, role: "Stage 4" },
+        "risk-reviewer":    { x: 50, y: 70, role: "Stage 5" },
+        "tech-writer":      { x: 50, y: 83, role: "Sink" },
       },
       edges: [
         ["prd-analyst", "domain-architect"],
@@ -658,5 +660,62 @@ window.AppData = (() => {
     "Done. Summary: the input was parsed cleanly, 2 conflicts flagged, 1 open question raised for the approver. Artifacts written to the workspace. Handing off to the next agent unless you want to review first.",
   ];
 
-  return { agents, skills, knowledge, templates, projects, sessions, conversation, tasks, edges, nodePos, topologies, agentThreads, approvals, clarifyQuestions, guidedAgentScript, mockReplies, providers, modelsByProvider };
+  const runtimeProjects = [
+    {
+      id: "proj-local",
+      name: "Local workspace",
+      description: "Default workspace for real AgentTeam sessions.",
+      icon: "folder",
+      color: "oklch(0.72 0.13 230)",
+      defaultTemplateId: null,
+      status: "active",
+      created: "Now",
+      lastActive: "Now",
+      env: { roots: [], configs: [] },
+    },
+  ];
+
+  const runtimeSessions = [
+    {
+      id: "sess-local-01",
+      projectId: "proj-local",
+      name: "New session",
+      status: "draft",
+      agents: 1,
+      turns: 0,
+      duration: "0m",
+      when: "Now",
+      createdBy: "Local user",
+    },
+  ];
+
+  const runtimeConversation = [
+    {
+      id: "msg-sess-local-01-0",
+      sessionId: "sess-local-01",
+      role: "system",
+      text: "Team ready — describe what you want to work on.",
+    },
+  ];
+
+  return {
+    agents,
+    skills,
+    knowledge,
+    templates,
+    projects: runtimeProjects,
+    sessions: runtimeSessions,
+    conversation: runtimeConversation,
+    tasks: [],
+    edges: [],
+    nodePos: {},
+    topologies,
+    agentThreads: {},
+    approvals: [],
+    clarifyQuestions,
+    guidedAgentScript,
+    mockReplies: [],
+    providers,
+    modelsByProvider,
+  };
 })();

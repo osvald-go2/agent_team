@@ -469,14 +469,6 @@ function SessionsPage({ store, currentProjectId, onOpenSession, onQuickStart }) 
           <div className="sub">{currentProjectId ? "In current project" : "All sessions"}</div>
         </div>
       </div>
-      {onQuickStart && (
-        <QuickStartStrip
-          presets={window.QUICKSTART_PRESETS}
-          title="Quick start a session"
-          sub={currentProjectId ? "Kick off a new session in this project" : "Start from a template"}
-          onPick={onQuickStart}
-        />
-      )}
       <div className="toolbar">
         <button className={"filter-pill " + (filter === "all" ? "active" : "")} onClick={() => setFilter("all")}>All · {all.length}</button>
         {statuses.map(st => (
@@ -488,7 +480,7 @@ function SessionsPage({ store, currentProjectId, onOpenSession, onQuickStart }) 
       {shown.length === 0 ? (
         <div className="empty-state">
           {all.length === 0
-            ? "No sessions yet — pick a Quick start above to create your first one."
+            ? "No sessions yet."
             : `No ${filter} sessions.`}
         </div>
       ) : (
