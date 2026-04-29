@@ -24,7 +24,7 @@ export const entityKinds = [
 ];
 
 export function loadAppData() {
-  const source = fs.readFileSync(`${config.repoRoot}/data.js`, "utf8");
+  const source = fs.readFileSync(`${config.frontendRoot}/data.js`, "utf8");
   const sandbox = { window: {} };
   vm.createContext(sandbox);
   vm.runInContext(source, sandbox, { filename: "data.js" });

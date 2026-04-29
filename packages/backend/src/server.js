@@ -233,9 +233,9 @@ wss.on("connection", (ws, req) => {
   ws.send(JSON.stringify({ type: "ws.ready", sessionId, createdAt: new Date().toISOString() }));
 });
 
-app.use(express.static(config.repoRoot, { index: "index.html" }));
+app.use(express.static(config.frontendRoot, { index: "index.html" }));
 app.get("*", (_req, res) => {
-  res.sendFile(path.join(config.repoRoot, "index.html"));
+  res.sendFile(path.join(config.frontendRoot, "index.html"));
 });
 
 server.listen(config.port, () => {

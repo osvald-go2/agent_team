@@ -2,7 +2,7 @@
 
 Atelier is a prototype multi-agent workspace UI for planning, running, and reviewing agent teams. It combines a chat-first session view with a live team canvas, CRUD screens for agent assets, approvals, history, and an optional local backend that can persist data and stream Codex CLI runs.
 
-The project is intentionally lightweight. The main UI is a static React prototype loaded directly from `index.html` with React 18 and Babel UMD scripts, so it can run without a frontend build step.
+The project is intentionally lightweight. The main UI lives in `packages/frontend/` and is a static React prototype loaded directly from `packages/frontend/index.html` with React 18 and Babel UMD scripts, so it can run without a frontend build step.
 
 ![Atelier session graph](_check/final.png)
 
@@ -33,11 +33,7 @@ The project is intentionally lightweight. The main UI is a static React prototyp
 
 ```text
 .
-|-- index.html                 # Static app entrypoint
-|-- App.jsx                    # Top-level React state and routing
-|-- data.js                    # Mock data source for the static prototype
-|-- api.js                     # Optional backend adapter
-|-- styles.css                 # UI styling and theme variables
+|-- packages/frontend/         # Static React prototype
 |-- packages/backend/          # Optional Node.js + SQLite backend
 |-- _check/                    # Reference screenshots used in this README
 `-- docs/                      # Design notes and implementation plans
@@ -45,9 +41,10 @@ The project is intentionally lightweight. The main UI is a static React prototyp
 
 ## Run the Static Prototype
 
-Open `index.html` directly in a browser, or serve the folder as static files:
+Open `packages/frontend/index.html` directly in a browser, or serve the frontend folder as static files:
 
 ```sh
+cd packages/frontend
 python3 -m http.server 8000
 ```
 
@@ -72,6 +69,8 @@ npm run dev
 
 By default the backend listens on `http://localhost:3001` and creates its local SQLite database under `packages/backend/data/`, which is ignored by git.
 
+The backend serves the frontend from `packages/frontend/`, so you can visit `http://localhost:3001` after `npm run dev`.
+
 When opening the UI from `file://`, `api.js` automatically targets `http://localhost:3001`. If you serve the frontend from another local web server, configure the page to set `window.AGENTTEAM_API_BASE = "http://localhost:3001"` before `api.js` loads, or serve/proxy the backend from the same origin.
 
 ## Backend Checks
@@ -84,5 +83,5 @@ npm test
 ## Notes
 
 - There is no frontend package manager, bundler, or build command for the static prototype.
-- Keep script load order in `index.html`; each JSX file attaches exports to `window`.
+- Keep script load order in `packages/frontend/index.html`; each JSX file attaches exports to `window`.
 - Do not commit `.env`, `node_modules`, backend databases, workspace runtime files, or generated video renders.

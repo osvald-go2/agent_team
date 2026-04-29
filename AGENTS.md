@@ -77,23 +77,24 @@ Project-specific facts. Always read these before touching code, but the guidelin
 
 ## What this is
 
-Atelier — a **design prototype** of a multi-agent workspace UI ("Agent Team Platform"). It is a static, no-build React app: `index.html` loads React 18 and `@babel/standalone` from UMD CDNs and every `.jsx` file is served as `type="text/babel"` and transpiled in the browser. There is no bundler, no `package.json`, no test runner, and no backend.
+Atelier — a **design prototype** of a multi-agent workspace UI ("Agent Team Platform"). The frontend lives in `packages/frontend/` and is a static, no-build React app: `packages/frontend/index.html` loads React 18 and `@babel/standalone` from UMD CDNs and every `.jsx` file is served as `type="text/babel"` and transpiled in the browser. There is no frontend bundler or frontend package file. The optional backend lives in `packages/backend/`.
 
 ## Running it
 
-Just open `index.html` in a browser, or serve the directory statically:
+Just open `packages/frontend/index.html` in a browser, or serve the frontend directory statically:
 
 ```sh
+cd packages/frontend
 python3 -m http.server 8000   # then visit http://localhost:8000
 ```
 
-Hard-reload after edits — `styles.css` and `data.js` are cache-busted with `?v=` query strings in `index.html`; bump them if a CDN/browser cache pins an old version.
+Hard-reload after edits — `styles.css` and `data.js` are cache-busted with `?v=` query strings in `packages/frontend/index.html`; bump them if a CDN/browser cache pins an old version.
 
-There are no lint, typecheck, test, or build commands — don't invent any.
+There are no frontend lint, typecheck, test, or build commands — don't invent any. Backend checks live under `packages/backend/`.
 
 ## Script load order (important)
 
-`index.html` loads scripts in a specific order that must be preserved when adding new files. Each `.jsx` assigns its exports to `window` (e.g. `Object.assign(window, { Sidebar, Topbar })`) and later files read them as globals. The order is:
+`packages/frontend/index.html` loads scripts in a specific order that must be preserved when adding new files. Each `.jsx` assigns its exports to `window` (e.g. `Object.assign(window, { Sidebar, Topbar })`) and later files read them as globals. The order is:
 
 `data.js` → `icons.jsx` → `CrudUI.jsx` → `Shell.jsx` → `Chat.jsx` → `TeamView.jsx` → `AgentDrawer.jsx` → `Pages.jsx` → `DetailShell.jsx` → `AgentDetail.jsx` → `SkillDetail.jsx` → `KBDetail.jsx` → `TemplateDetail.jsx` → `App.jsx`
 
