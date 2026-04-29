@@ -16,6 +16,8 @@ coverage/
 .next/
 .parcel-cache/
 .playwright-cli/
+.playwright/
+.pnpm-store/
 .claude/worktrees/
 
 # Runtime data

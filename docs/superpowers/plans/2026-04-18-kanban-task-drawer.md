@@ -14,7 +14,7 @@
 - No `import/export` — each `.jsx` ends with `Object.assign(window, { Foo })` or `window.Foo = Foo`
 - Script order in `index.html` is load-bearing — new files must slot in before any consumer
 - Bump `?v=` query strings on `styles.css` / `data.js` when edited (cache busting)
-- `_check/` reference screenshots and `uploads/` are **not** referenced from code — leave them alone
+- `docs/assets/screenshots/checkpoints/` reference screenshots and `docs/assets/uploads/` are **not** referenced from code — leave them alone
 - Do NOT remove or rename `/*EDITMODE-BEGIN*/ ... /*EDITMODE-END*/` markers or the `postMessage` types in `App.jsx`
 - No test runner, no lint, no typecheck — verification is **manual in a browser** after each task
 

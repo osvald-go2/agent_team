@@ -4,7 +4,7 @@ Atelier is a prototype multi-agent workspace UI for planning, running, and revie
 
 The project is intentionally lightweight. The main UI lives in `packages/frontend/` and is a static React prototype loaded directly from `packages/frontend/index.html` with React 18 and Babel UMD scripts, so it can run without a frontend build step.
 
-![Atelier session graph](_check/final.png)
+![Atelier session graph](docs/assets/screenshots/checkpoints/final.png)
 
 ## Highlights
 
@@ -19,15 +19,15 @@ The project is intentionally lightweight. The main UI lives in `packages/fronten
 
 ### Project Dashboard
 
-![Project dashboard](_check/anim-13-dashboard.png)
+![Project dashboard](docs/assets/screenshots/checkpoints/anim-13-dashboard.png)
 
 ### Agent Team Canvas
 
-![Agent team canvas](_check/canvas.png)
+![Agent team canvas](docs/assets/screenshots/checkpoints/canvas.png)
 
 ### Approvals
 
-![Approvals queue](_check/approvals.png)
+![Approvals queue](docs/assets/screenshots/checkpoints/approvals.png)
 
 ## Repository Layout
 
@@ -35,8 +35,8 @@ The project is intentionally lightweight. The main UI lives in `packages/fronten
 .
 |-- packages/frontend/         # Static React prototype
 |-- packages/backend/          # Optional Node.js + SQLite backend
-|-- _check/                    # Reference screenshots used in this README
-`-- docs/                      # Design notes and implementation plans
+|-- docs/                      # Design notes, plans, and project assets
+`-- skills-lock.json           # Agent skill lockfile
 ```
 
 ## Run the Static Prototype

@@ -129,4 +129,4 @@ New components go before the first file that uses them; `App.jsx` is always last
 - JSX in `.jsx` files only, no imports/exports — attach to `window` at the bottom (`Object.assign(window, { Foo, Bar })`) so later scripts can read them.
 - No TypeScript, no JSX build tooling — keep syntax to what `@babel/standalone` transpiles out of the box.
 - Icons come from `icons.jsx` via `<Icon name="..." size={...} />`; names are enumerated in that file — prefer adding to it over inlining SVGs.
-- `_check/` holds reference screenshots (design checkpoints). `uploads/` holds pasted images. Neither is loaded by the app — don't reference them from code.
+- `docs/assets/screenshots/checkpoints/` holds reference screenshots (design checkpoints). `docs/assets/uploads/` holds pasted images. Neither is loaded by the app — don't reference them from code.
