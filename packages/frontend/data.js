@@ -102,7 +102,7 @@ window.AppData = (() => {
 
   const skills = [
     { id: "doc.parse", name: "doc.parse", category: "Ingest", desc: "Parse PDF / DOCX / MD into structured blocks.", kind: "builtin", calls: 1284 },
-    { id: "kb.search", name: "kb.search", category: "Retrieve", desc: "Hybrid search across knowledge bases.", kind: "builtin", calls: 9214 },
+    { id: "kb.search", name: "kb.search", category: "Reference", desc: "Open linked Markdown vault notes and backlinks.", kind: "builtin", calls: 9214 },
     { id: "req.extract", name: "req.extract", category: "Analyze", desc: "Extract user stories, AC and non-functionals.", kind: "custom", calls: 342 },
     { id: "web.search", name: "web.search", category: "Retrieve", desc: "Search the web for references.", kind: "builtin", calls: 2108 },
     { id: "diagram.mermaid", name: "diagram.mermaid", category: "Produce", desc: "Render Mermaid diagrams to SVG.", kind: "builtin", calls: 544 },
@@ -122,15 +122,15 @@ window.AppData = (() => {
   ];
 
   const knowledge = [
-    { id: "kb-prd-templates", name: "PRD Templates", items: 34, size: "2.1 MB", updated: "2d ago", tags: ["product", "template"] },
-    { id: "kb-glossary", name: "Company Glossary", items: 812, size: "640 KB", updated: "5h ago", tags: ["reference"] },
-    { id: "kb-existing-arch", name: "Existing Architecture", items: 126, size: "18 MB", updated: "1d ago", tags: ["engineering", "c4"] },
-    { id: "kb-adr-library", name: "ADR Library", items: 91, size: "3.4 MB", updated: "12h ago", tags: ["engineering"] },
-    { id: "kb-api-style-guide", name: "API Style Guide", items: 12, size: "320 KB", updated: "1w ago", tags: ["engineering"] },
-    { id: "kb-data-catalog", name: "Data Catalog", items: 640, size: "44 MB", updated: "3h ago", tags: ["data"] },
-    { id: "kb-security-policy", name: "Security Policy", items: 48, size: "1.2 MB", updated: "4d ago", tags: ["security"] },
-    { id: "kb-sla-tiers", name: "SLA Tiers", items: 7, size: "84 KB", updated: "2w ago", tags: ["ops"] },
-    { id: "kb-doc-templates", name: "Doc Templates", items: 18, size: "560 KB", updated: "3d ago", tags: ["writing"] },
+    { id: "kb-prd-templates", name: "PRD Templates", desc: "Reusable PRD sections, acceptance criteria, and launch-note patterns.", notes: 34, items: 34, links: 118, folders: 5, size: "2.1 MB", updated: "2d ago", tags: ["product", "template"] },
+    { id: "kb-glossary", name: "Company Glossary", desc: "Canonical terms, aliases, and domain vocabulary linked from team notes.", notes: 812, items: 812, links: 2406, folders: 8, size: "640 KB", updated: "5h ago", tags: ["reference"] },
+    { id: "kb-existing-arch", name: "Existing Architecture", desc: "Service boundaries, context maps, interface notes, and architecture references.", notes: 126, items: 126, links: 438, folders: 7, size: "18 MB", updated: "1d ago", tags: ["engineering", "c4"] },
+    { id: "kb-adr-library", name: "ADR Library", desc: "Architecture decisions connected by capability, system, and trade-off.", notes: 91, items: 91, links: 312, folders: 6, size: "3.4 MB", updated: "12h ago", tags: ["engineering"] },
+    { id: "kb-api-style-guide", name: "API Style Guide", desc: "Endpoint patterns, naming rules, examples, and review checklists.", notes: 12, items: 12, links: 44, folders: 4, size: "320 KB", updated: "1w ago", tags: ["engineering"] },
+    { id: "kb-data-catalog", name: "Data Catalog", desc: "Dataset ownership, lineage notes, metric definitions, and caveats.", notes: 640, items: 640, links: 1890, folders: 9, size: "44 MB", updated: "3h ago", tags: ["data"] },
+    { id: "kb-security-policy", name: "Security Policy", desc: "Controls, review paths, threat notes, and policy references.", notes: 48, items: 48, links: 166, folders: 5, size: "1.2 MB", updated: "4d ago", tags: ["security"] },
+    { id: "kb-sla-tiers", name: "SLA Tiers", desc: "Reliability commitments, escalation notes, and tier comparison references.", notes: 7, items: 7, links: 23, folders: 3, size: "84 KB", updated: "2w ago", tags: ["ops"] },
+    { id: "kb-doc-templates", name: "Doc Templates", desc: "Markdown outlines, style notes, and publishing references.", notes: 18, items: 18, links: 57, folders: 4, size: "560 KB", updated: "3d ago", tags: ["writing"] },
   ];
 
   const templates = [

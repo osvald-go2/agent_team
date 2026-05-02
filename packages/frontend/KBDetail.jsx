@@ -1,4 +1,4 @@
-// KBDetail — simple header + left file tree / right markdown preview (rendered or source).
+// KBDetail — Markdown vault workspace with wiki links, backlinks, and a local graph.
 
 function KBDetail({ kbId, store, goBack }) {
   const kb = store.state.knowledge.find(k => k.id === kbId);
@@ -13,20 +13,33 @@ function KBDetail({ kbId, store, goBack }) {
   }
 
   const docs = React.useMemo(() => ensureKBDocs(kb), [kb.id, kb.docs]);
+  const vault = React.useMemo(() => buildVaultIndex(docs), [docs]);
   const defaultPath = (docs[0] || {}).name;
   const [activePath, setActivePath] = React.useState(defaultPath);
   const [viewMode, setViewMode] = React.useState("rendered");
+
   React.useEffect(() => {
     setActivePath(defaultPath);
     setViewMode("rendered");
-  }, [kb.id]);
+  }, [kb.id, defaultPath]);
 
-  const active = docs.find(d => d.name === activePath) || docs[0];
+  const active = vault.docsByPath[activePath] || docs[0];
+  const activeInfo = active ? vault.infoByPath[active.name] : null;
   const nodes = React.useMemo(() => buildFileTree(docs, d => d.name), [docs]);
   const isMd = active && /\.md$/i.test(active.name);
+  const outbound = activeInfo ? activeInfo.links : [];
+  const backlinks = active ? (vault.backlinksByPath[active.name] || []) : [];
+  const mentions = active ? findUnlinkedMentions(docs, active, backlinks) : [];
+  const noteCount = docs.filter(d => /\.md$/i.test(d.name || "")).length;
+
+  const pickPath = (path) => {
+    if (!path || !vault.docsByPath[path]) return;
+    setActivePath(path);
+    setViewMode("rendered");
+  };
 
   return (
-    <div className="simple-detail">
+    <div className="simple-detail kb-vault-detail">
       <div className="detail-topbar">
         <button className="back-btn" onClick={goBack}>
           <Icon name="arrow" size={13} style={{ transform: "scaleX(-1)" }} /> Back
@@ -39,27 +52,44 @@ function KBDetail({ kbId, store, goBack }) {
         <div className="spacer" />
       </div>
 
-      <div className="simple-detail-head">
-        <div className="sd-title">{kb.name}</div>
-        {kb.desc && <div className="sd-desc">{kb.desc}</div>}
-        <div className="sd-meta muted small">
-          <span>{docs.length} docs</span>
-          {kb.size && <><span className="sep">·</span><span>{kb.size}</span></>}
-          {kb.updated && <><span className="sep">·</span><span>updated {kb.updated}</span></>}
+      <div className="simple-detail-head kb-vault-head">
+        <div>
+          <div className="sd-title">{kb.name}</div>
+          <div className="sd-desc">{kb.desc || "A Markdown vault organized by notes, links, and references."}</div>
+        </div>
+        <div className="kb-vault-stats">
+          <span><Icon name="doc" size={12} /> {noteCount} notes</span>
+          <span><Icon name="link" size={12} /> {vault.edges.length} links</span>
+          <span><Icon name="folder" size={12} /> {countTopFolders(docs)} folders</span>
+          {kb.updated && <span><Icon name="clock" size={12} /> {kb.updated}</span>}
         </div>
       </div>
 
-      <div className="detail-twocol">
-        <aside className="file-pane">
-          <FileTree nodes={nodes} activePath={activePath} onPick={n => setActivePath(n.path)} />
+      <div className="kb-vault-layout">
+        <aside className="kb-tree-pane">
+          <div className="kb-pane-head">
+            <div>
+              <div className="kb-pane-title">Vault</div>
+              <div className="small muted mono">{kb.id}</div>
+            </div>
+          </div>
+          <FileTree nodes={nodes} activePath={active?.name} onPick={n => pickPath(n.path)} />
         </aside>
-        <main className="file-preview">
+
+        <main className="kb-note-pane">
           {active ? (
             <>
-              <div className="file-preview-head">
-                <Icon name={iconForPath(active.name)} size={12} />
-                <span className="fp-path mono">{active.name}</span>
-                <span style={{ flex: 1 }} />
+              <div className="kb-note-head">
+                <div className="kb-note-path">
+                  <Icon name={iconForPath(active.name)} size={13} />
+                  {active.name.split("/").map((part, i, arr) => (
+                    <React.Fragment key={i}>
+                      <span className={i === arr.length - 1 ? "current" : ""}>{part}</span>
+                      {i < arr.length - 1 && <span className="sep">/</span>}
+                    </React.Fragment>
+                  ))}
+                </div>
+                <div className="spacer" />
                 {isMd && (
                   <SegControl value={viewMode} onChange={setViewMode}
                     options={[
@@ -68,21 +98,185 @@ function KBDetail({ kbId, store, goBack }) {
                     ]} />
                 )}
               </div>
-              <div className="file-preview-body md-scroll">
+
+              <div className="kb-note-body">
+                <div className="kb-note-meta">
+                  <h2>{activeInfo?.title || titleFromPath(active.name)}</h2>
+                  <div className="kb-note-meta-line">
+                    {active.updated && <span><Icon name="clock" size={11} /> {active.updated}</span>}
+                    {(active.tags || []).map(t => <span key={t} className="chip">#{t}</span>)}
+                  </div>
+                </div>
+
                 {isMd && viewMode === "rendered"
-                  ? <MarkdownView source={active.content || ""} />
+                  ? <WikiMarkdownView source={active.content || ""} vault={vault} onNavigate={pickPath} />
                   : <CodeEditor value={active.content || ""}
                       language={isMd ? "markdown" : languageForPath(active.name)} readOnly />
                 }
+
+                {isMd && (
+                  <ReferenceStrip links={outbound} onPick={pickPath} />
+                )}
               </div>
             </>
           ) : (
             <div className="empty-inline" style={{ padding: 60, textAlign: "center" }}>
-              Select a document.
+              Select a note.
             </div>
           )}
         </main>
+
+        <aside className="kb-side-pane">
+          <section className="kb-side-section">
+            <div className="kb-section-head">
+              <div>
+                <h3>Graph</h3>
+                <div className="small muted">Local links in this vault</div>
+              </div>
+              <Icon name="network" size={14} />
+            </div>
+            <VaultGraph vault={vault} activePath={active?.name} onPick={pickPath} />
+          </section>
+
+          <section className="kb-side-section">
+            <div className="kb-section-head">
+              <div>
+                <h3>Backlinks</h3>
+                <div className="small muted">{backlinks.length} notes reference this note</div>
+              </div>
+              <Icon name="link" size={14} />
+            </div>
+            <BacklinkList items={backlinks} docsByPath={vault.docsByPath} onPick={pickPath} empty="No backlinks yet." />
+          </section>
+
+          <section className="kb-side-section">
+            <div className="kb-section-head">
+              <div>
+                <h3>Unlinked mentions</h3>
+                <div className="small muted">Text mentions without [[links]]</div>
+              </div>
+              <Icon name="quote" size={14} />
+            </div>
+            <MentionList items={mentions} onPick={pickPath} />
+          </section>
+        </aside>
       </div>
+    </div>
+  );
+}
+
+function WikiMarkdownView({ source, vault, onNavigate }) {
+  const ref = React.useRef(null);
+  const html = React.useMemo(() => {
+    if (!window.marked) return "<pre>" + escapeHtml(source || "") + "</pre>";
+    try {
+      window.marked.setOptions({ gfm: true, breaks: false, headerIds: false, mangle: false });
+      return window.marked.parse(decorateWikiLinks(source || "", vault));
+    } catch {
+      return "<pre>" + escapeHtml(source || "") + "</pre>";
+    }
+  }, [source, vault]);
+
+  React.useEffect(() => {
+    if (!ref.current || !window.hljs) return;
+    ref.current.querySelectorAll("pre code").forEach(el => {
+      try { window.hljs.highlightElement(el); } catch {}
+    });
+  }, [html]);
+
+  const handleClick = (e) => {
+    const link = e.target.closest && e.target.closest("[data-wiki-path], [data-wiki-target]");
+    if (!link) return;
+    e.preventDefault();
+    const path = link.getAttribute("data-wiki-path");
+    if (path) onNavigate(path);
+  };
+
+  return <div ref={ref} className="md-body kb-md-body" onClick={handleClick} dangerouslySetInnerHTML={{ __html: html }} />;
+}
+
+function ReferenceStrip({ links, onPick }) {
+  return (
+    <section className="kb-reference-strip">
+      <div className="kb-ref-label">References from this note</div>
+      <div className="kb-ref-list">
+        {links.length === 0 && <span className="muted small">No wiki links in this note.</span>}
+        {links.map((link, i) => (
+          <button key={i}
+            className={"kb-ref-chip " + (link.path ? "" : "missing")}
+            onClick={() => link.path && onPick(link.path)}
+            disabled={!link.path}>
+            <Icon name={link.path ? "link" : "alert"} size={11} />
+            <span>{link.label || link.target}</span>
+          </button>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function VaultGraph({ vault, activePath, onPick }) {
+  const layout = React.useMemo(() => layoutVaultGraph(vault, activePath), [vault, activePath]);
+  return (
+    <svg className="kb-graph" viewBox="0 0 320 220" role="img" aria-label="Knowledge graph">
+      <g className="kb-graph-edges">
+        {layout.edges.map((edge, i) => {
+          const from = layout.positions[edge.from];
+          const to = layout.positions[edge.to];
+          if (!from || !to) return null;
+          const isActive = edge.from === activePath || edge.to === activePath;
+          return <line key={i} x1={from.x} y1={from.y} x2={to.x} y2={to.y} className={isActive ? "active" : ""} />;
+        })}
+      </g>
+      <g className="kb-graph-nodes">
+        {layout.nodes.map(node => {
+          const pos = layout.positions[node.id];
+          const cls = [
+            "kb-graph-node",
+            node.id === activePath ? "active" : "",
+            node.missing ? "missing" : "",
+          ].filter(Boolean).join(" ");
+          return (
+            <g key={node.id} className={cls} transform={`translate(${pos.x} ${pos.y})`}
+              onClick={() => !node.missing && onPick(node.path)}>
+              <circle r={node.id === activePath ? 12 : 8} />
+              <text y={node.id === activePath ? 26 : 22}>{shortGraphLabel(node.title)}</text>
+            </g>
+          );
+        })}
+      </g>
+    </svg>
+  );
+}
+
+function BacklinkList({ items, docsByPath, onPick, empty }) {
+  if (!items.length) return <div className="empty-inline">{empty}</div>;
+  return (
+    <div className="kb-backlink-list">
+      {items.map((item, i) => {
+        const doc = docsByPath[item.from];
+        return (
+          <button key={i} className="kb-backlink" onClick={() => onPick(item.from)}>
+            <span className="kb-backlink-title">{doc ? titleFromDoc(doc) : item.from}</span>
+            <span className="kb-backlink-path mono">{item.from}</span>
+            {item.label && <span className="kb-backlink-context">linked as [[{item.label}]]</span>}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+function MentionList({ items, onPick }) {
+  if (!items.length) return <div className="empty-inline">No plain-text mentions found.</div>;
+  return (
+    <div className="kb-backlink-list">
+      {items.map(item => (
+        <button key={item.path} className="kb-backlink" onClick={() => onPick(item.path)}>
+          <span className="kb-backlink-title">{item.title}</span>
+          <span className="kb-backlink-context">{item.context}</span>
+        </button>
+      ))}
     </div>
   );
 }
@@ -90,270 +284,407 @@ function KBDetail({ kbId, store, goBack }) {
 function ensureKBDocs(kb) {
   const existing = Array.isArray(kb.docs) ? kb.docs : [];
   const hasContent = existing.some(d => d.content);
-  if (hasContent) return existing;
+  if (hasContent) return existing.filter(d => /\.md$/i.test(d.name || ""));
   return buildDefaultDocs(kb);
 }
 
 function buildDefaultDocs(kb) {
-  const tags = kb.tags || [];
   const topic = kb.name || "Knowledge Base";
+  const tags = kb.tags || [];
   return [
-    { id: kb.id + "-readme", name: "README.md", type: "md", size: "2 KB",
-      status: "indexed", chunks: 8, updated: kb.updated || "recent",
+    { id: kb.id + "-readme", name: "README.md", type: "md", updated: kb.updated || "recent", tags,
       content: readmeContent(kb, topic) },
-    { id: kb.id + "-overview", name: "wiki/overview.md", type: "md", size: "4 KB",
-      status: "indexed", chunks: 16, updated: kb.updated || "recent",
-      content: overviewContent(kb, topic) },
-    { id: kb.id + "-glossary", name: "wiki/concepts/glossary.md", type: "md", size: "3 KB",
-      status: "indexed", chunks: 12, updated: "1 week ago",
-      content: glossaryContent(kb, topic) },
-    { id: kb.id + "-practices", name: "wiki/concepts/best-practices.md", type: "md", size: "6 KB",
-      status: "indexed", chunks: 24, updated: "3 days ago",
-      content: bestPracticesContent(kb, topic) },
-    { id: kb.id + "-pitfalls", name: "wiki/concepts/common-pitfalls.md", type: "md", size: "3 KB",
-      status: "indexed", chunks: 10, updated: "5 days ago",
-      content: pitfallsContent(kb, topic) },
-    { id: kb.id + "-intro", name: "raw/source-intro.md", type: "md", size: "2 KB",
-      status: "indexed", chunks: 6, updated: "2 weeks ago",
-      content: sourceIntroContent(kb, topic) },
-    { id: kb.id + "-changelog", name: "raw/changelog.md", type: "md", size: "1 KB",
-      status: "indexed", chunks: 4, updated: kb.updated || "recent",
-      content: changelogContent(kb, topic) },
-    { id: kb.id + "-config", name: "config.yaml", type: "yaml", size: "512 B",
-      status: "indexed", chunks: 1, updated: "2 weeks ago",
-      content: configYamlContent(kb) },
+    { id: kb.id + "-map", name: "map/knowledge-map.md", type: "md", updated: kb.updated || "recent", tags: ["map"].concat(tags.slice(0, 1)),
+      content: knowledgeMapContent(kb, topic) },
+    { id: kb.id + "-concepts", name: "notes/core-concepts.md", type: "md", updated: "3 days ago", tags: ["concepts"].concat(tags.slice(0, 1)),
+      content: coreConceptsContent(kb, topic) },
+    { id: kb.id + "-patterns", name: "notes/reference-patterns.md", type: "md", updated: "4 days ago", tags: ["patterns"].concat(tags.slice(0, 1)),
+      content: patternsContent(kb, topic) },
+    { id: kb.id + "-questions", name: "notes/open-questions.md", type: "md", updated: "1 week ago", tags: ["questions"],
+      content: openQuestionsContent(kb, topic) },
+    { id: kb.id + "-sources", name: "sources/source-notes.md", type: "md", updated: "2 weeks ago", tags: ["sources"],
+      content: sourceNotesContent(kb, topic) },
+    { id: kb.id + "-refs", name: "references/citations.md", type: "md", updated: "2 weeks ago", tags: ["references"],
+      content: citationsContent(kb, topic) },
   ];
+}
+
+function buildVaultIndex(docs) {
+  const mdDocs = docs.filter(d => /\.md$/i.test(d.name || ""));
+  const aliases = buildAliasIndex(mdDocs);
+  const docsByPath = {};
+  const infoByPath = {};
+  const backlinksByPath = {};
+  const edges = [];
+  const missing = {};
+
+  mdDocs.forEach(doc => {
+    docsByPath[doc.name] = doc;
+    backlinksByPath[doc.name] = [];
+  });
+
+  mdDocs.forEach(doc => {
+    const links = parseWikiLinks(doc.content || "").map(link => {
+      const path = resolveWikiLink(link.target, aliases, docsByPath);
+      if (!path) missing[missingNodeId(link.target)] = link.target;
+      return { ...link, path };
+    });
+    infoByPath[doc.name] = { title: titleFromDoc(doc), links };
+    links.forEach(link => {
+      const to = link.path || missingNodeId(link.target);
+      edges.push({ from: doc.name, to, label: link.label, target: link.target, missing: !link.path });
+      if (link.path && backlinksByPath[link.path]) {
+        backlinksByPath[link.path].push({ from: doc.name, label: link.label, target: link.target });
+      }
+    });
+  });
+
+  return { docs: mdDocs, docsByPath, infoByPath, backlinksByPath, edges, missing };
+}
+
+function buildAliasIndex(docs) {
+  const aliases = {};
+  docs.forEach(doc => {
+    aliasKeysForDoc(doc).forEach(key => {
+      if (!key) return;
+      aliases[key] = aliases[key] && aliases[key] !== doc.name ? null : doc.name;
+    });
+  });
+  return aliases;
+}
+
+function aliasKeysForDoc(doc) {
+  const path = doc.name || "";
+  const noExt = path.replace(/\.md$/i, "");
+  const base = noExt.split("/").pop();
+  const title = titleFromDoc(doc);
+  return [
+    path,
+    noExt,
+    base,
+    title,
+    slugifyText(base),
+    slugifyText(title),
+  ].map(normalizeLinkKey);
+}
+
+function parseWikiLinks(source) {
+  const out = [];
+  const re = /\[\[([^[\]\n]+?)\]\]/g;
+  let match;
+  while ((match = re.exec(source || ""))) {
+    const parts = match[1].split("|");
+    const target = (parts[0] || "").trim();
+    const label = (parts[1] || target).trim();
+    if (target) out.push({ raw: match[0], target, label });
+  }
+  return out;
+}
+
+function resolveWikiLink(target, aliases, docsByPath) {
+  const clean = String(target || "").trim().replace(/^\/+/, "");
+  if (docsByPath[clean]) return clean;
+  if (docsByPath[clean + ".md"]) return clean + ".md";
+  const key = normalizeLinkKey(clean);
+  return aliases[key] || null;
+}
+
+function decorateWikiLinks(source, vault) {
+  const aliasIndex = buildAliasIndex(vault.docs);
+  return String(source || "").split(/(```[\s\S]*?```)/g).map(part => {
+    if (part.startsWith("```")) return part;
+    return decorateWikiLinkText(part, vault, aliasIndex);
+  }).join("");
+}
+
+function decorateWikiLinkText(source, vault, aliasIndex) {
+  return (source || "").replace(/\[\[([^[\]\n]+?)\]\]/g, (full, inner) => {
+    const parts = inner.split("|");
+    const target = (parts[0] || "").trim();
+    const label = (parts[1] || target).trim();
+    const path = resolveWikiLink(target, aliasIndex, vault.docsByPath);
+    const cls = "wiki-link" + (path ? "" : " missing");
+    return `<a href="#wiki-${encodeURIComponent(target)}" class="${cls}" data-wiki-target="${escapeAttr(target)}" data-wiki-path="${escapeAttr(path || "")}">${escapeHtml(label)}</a>`;
+  });
+}
+
+function normalizeLinkKey(value) {
+  return String(value || "")
+    .trim()
+    .replace(/\\/g, "/")
+    .replace(/^\/+/, "")
+    .replace(/\.md$/i, "")
+    .toLowerCase();
+}
+
+function slugifyText(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
+function missingNodeId(target) {
+  return "missing:" + normalizeLinkKey(target);
+}
+
+function titleFromDoc(doc) {
+  const heading = extractFirstHeading(doc.content || "");
+  return heading || titleFromPath(doc.name);
+}
+
+function titleFromPath(path) {
+  const base = String(path || "").split("/").pop().replace(/\.md$/i, "");
+  return base.split(/[-_]/).filter(Boolean).map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
+}
+
+function extractFirstHeading(source) {
+  const match = String(source || "").match(/^#\s+(.+)$/m);
+  return match ? match[1].replace(/`/g, "").trim() : "";
+}
+
+function escapeAttr(value) {
+  return escapeHtml(value).replace(/"/g, "&quot;");
+}
+
+function countTopFolders(docs) {
+  return new Set(docs.map(d => {
+    const parts = (d.name || "").split("/");
+    return parts.length > 1 ? parts[0] : null;
+  }).filter(Boolean)).size;
+}
+
+function layoutVaultGraph(vault, activePath) {
+  const docNodes = vault.docs.map(doc => ({
+    id: doc.name,
+    path: doc.name,
+    title: vault.infoByPath[doc.name]?.title || titleFromPath(doc.name),
+  }));
+  const missingNodes = Object.keys(vault.missing).map(id => ({
+    id,
+    path: "",
+    title: vault.missing[id],
+    missing: true,
+  }));
+  const nodes = docNodes.concat(missingNodes);
+  const positions = {};
+  const active = nodes.find(n => n.id === activePath);
+  const orbit = nodes.filter(n => n.id !== activePath);
+  const cx = 160;
+  const cy = 104;
+
+  if (active) positions[active.id] = { x: cx, y: cy };
+  orbit.forEach((node, i) => {
+    const angle = -Math.PI / 2 + (Math.PI * 2 * i) / Math.max(orbit.length, 1);
+    const rx = node.missing ? 122 : 112;
+    const ry = node.missing ? 78 : 70;
+    positions[node.id] = {
+      x: cx + Math.cos(angle) * rx,
+      y: cy + Math.sin(angle) * ry,
+    };
+  });
+
+  return { nodes, positions, edges: vault.edges };
+}
+
+function shortGraphLabel(label) {
+  const text = String(label || "");
+  return text.length > 18 ? text.slice(0, 16) + "..." : text;
+}
+
+function findUnlinkedMentions(docs, active, backlinks) {
+  const title = titleFromDoc(active);
+  const base = titleFromPath(active.name);
+  const terms = [title, base].filter(Boolean).map(t => t.toLowerCase());
+  const linked = new Set(backlinks.map(b => b.from));
+  const activePath = active.name;
+
+  return docs
+    .filter(doc => doc.name !== activePath && !linked.has(doc.name))
+    .map(doc => {
+      const source = stripWikiLinks(doc.content || "");
+      const lower = source.toLowerCase();
+      const term = terms.find(t => t && lower.includes(t));
+      if (!term) return null;
+      const index = lower.indexOf(term);
+      const start = Math.max(0, index - 42);
+      const end = Math.min(source.length, index + term.length + 58);
+      return {
+        path: doc.name,
+        title: titleFromDoc(doc),
+        context: source.slice(start, end).replace(/\s+/g, " ").trim(),
+      };
+    })
+    .filter(Boolean)
+    .slice(0, 4);
+}
+
+function stripWikiLinks(source) {
+  return String(source || "").replace(/\[\[([^[\]\n]+?)\]\]/g, "");
 }
 
 function readmeContent(kb, topic) {
   return [
     "# " + topic,
     "",
-    "> " + (kb.desc || "A curated knowledge base for this topic."),
+    "> " + (kb.desc || "Markdown notes for this topic, connected by wiki links and references."),
     "",
-    "## Contents",
+    "## Start here",
     "",
-    "- **wiki/** — long-form concepts and reference material",
-    "  - `overview.md` — start here for a high-level tour",
-    "  - `concepts/` — individual topics, one per file",
-    "- **raw/** — source material imported as-is",
-    "- **config.yaml** — indexing and retrieval settings",
+    "- Open the [[map/knowledge-map|knowledge map]] for the vault structure.",
+    "- Read [[notes/core-concepts|core concepts]] before applying [[notes/reference-patterns|reference patterns]].",
+    "- Check [[references/citations|citations]] when a note needs source context.",
     "",
-    "## Stats",
+    "## Vault rules",
     "",
-    "| Field   | Value |",
-    "| ------- | ----- |",
-    "| Items   | " + (kb.items ?? "—") + " |",
-    "| Size    | " + (kb.size || "—") + " |",
-    "| Updated | " + (kb.updated || "—") + " |",
+    "- One concept per Markdown note.",
+    "- Use `[[wiki links]]` for internal references.",
+    "- Put source excerpts in `sources/` and link back to the note that interprets them.",
     "",
     "## Tags",
     "",
-    (kb.tags || []).map(t => "`" + t + "`").join(" ") || "_(none)_",
+    (kb.tags || []).map(t => "`#" + t + "`").join(" ") || "_No tags yet._",
     "",
   ].join("\n");
 }
 
-function overviewContent(kb, topic) {
+function knowledgeMapContent(kb, topic) {
   return [
-    "# " + topic + " — Overview",
+    "# Knowledge Map",
     "",
-    "This knowledge base collects the material an agent needs to answer questions about **" + topic + "**.",
-    "Agents retrieve from it via hybrid search: keyword BM25 plus dense vectors from the configured embedding model.",
+    "The vault is layered from stable context to working notes.",
     "",
-    "## Coverage",
+    "## Layers",
     "",
-    "1. **Core concepts** — vocabulary, reference definitions, and the relationships between them",
-    "2. **Operating practices** — how things are actually done, including known-good patterns",
-    "3. **Historical context** — prior decisions, incidents, and the rationale that produced them",
+    "| Layer | Purpose | Key notes |",
+    "| --- | --- | --- |",
+    "| `README.md` | Entry point | [[README]] |",
+    "| `notes/` | Interpreted knowledge | [[notes/core-concepts]], [[notes/reference-patterns]] |",
+    "| `sources/` | Source excerpts | [[sources/source-notes]] |",
+    "| `references/` | Citation and provenance notes | [[references/citations]] |",
     "",
-    "## How to use it",
-    "",
-    "The retriever is tuned for precision over recall. Ask **specific** questions, reference concrete",
-    "entities, and include relevant tags in the query when possible.",
-    "",
-    "### Example query",
+    "## Link flow",
     "",
     "```text",
-    "Find the canonical definition of \"" + topic + "\" and the top three references that cite it.",
+    "README -> Knowledge Map -> Core Concepts -> Reference Patterns",
+    "                         -> Source Notes -> Citations",
     "```",
     "",
-    "## Caveats",
-    "",
-    "- Content is versioned; older revisions may contradict the current best practice. Check `updated`.",
-    "- Tags are curated, not exhaustive. Don't rely on a tag's absence to infer a topic isn't covered.",
+    "Use [[notes/open-questions|open questions]] to track gaps without inventing content.",
     "",
   ].join("\n");
 }
 
-function glossaryContent(kb, topic) {
+function coreConceptsContent(kb, topic) {
   return [
-    "# Glossary",
+    "# Core Concepts",
     "",
-    "Quick reference for the vocabulary used throughout **" + topic + "**.",
+    "A short glossary of the ideas that recur across **" + topic + "**.",
     "",
-    "### Aggregate",
-    "A cluster of domain objects that is treated as a single unit for the purposes of data changes.",
+    "## Canonical note",
     "",
-    "### Bounded context",
-    "An explicit boundary within which a particular domain model is defined and applicable.",
+    "Every important term gets a canonical note, then related notes link to it with `[[term]]` syntax.",
+    "This keeps the graph readable and makes backlinks useful.",
     "",
-    "### Eventual consistency",
-    "A guarantee that, given no new updates, replicas will converge to the same state over time.",
+    "## Working context",
     "",
-    "### Idempotency",
-    "An operation that produces the same result regardless of how many times it is applied.",
-    "",
-    "### SLO / SLA",
-    "**SLO** is an internal target; **SLA** is an external contractual commitment, usually weaker.",
-    "",
-    "### Ubiquitous language",
-    "A shared vocabulary used by both developers and domain experts, structured around the domain model.",
-    "",
-  ].join("\n");
-}
-
-function bestPracticesContent(kb, topic) {
-  return [
-    "# Best Practices",
-    "",
-    "Patterns that have consistently worked for teams operating on **" + topic + "**.",
-    "",
-    "## 1. Prefer explicit over implicit",
-    "",
-    "Make dependencies, invariants and failure modes visible in the code, not just in your head.",
-    "Implicit rules are the first thing a new contributor breaks.",
-    "",
-    "```python",
-    "# bad — callers have to know `None` means `skip`",
-    "def process(job, deadline=None): ...",
-    "",
-    "# good — the contract is visible",
-    "def process(job, deadline: datetime | SkipDeadline) -> Result: ...",
-    "```",
-    "",
-    "## 2. Design for reversibility",
-    "",
-    "Cheap-to-reverse decisions should be made fast and iterated. Expensive-to-reverse decisions",
-    "deserve proportionally more upfront analysis. Don't apply the same process to both.",
-    "",
-    "## 3. Short feedback loops",
-    "",
-    "The highest-leverage investment is almost always compressing the loop between change and signal.",
-    "A 30-second test run enables experimentation a 5-minute run does not.",
-    "",
-    "> \"The faster the feedback, the sharper the thinking.\" — common refrain",
-    "",
-    "## 4. Write for the next reader",
-    "",
-    "Code is read many more times than it is written. Optimize for the reader who has less context",
-    "than you do — that reader is usually you, three months from now.",
+    "- Prefer named examples over generic advice.",
+    "- Link from decisions to the concept they depend on.",
+    "- When a note quotes source material, connect it to [[sources/source-notes]].",
     "",
     "## Related",
     "",
-    "- [[overview]]",
-    "- [[common-pitfalls]]",
+    "- [[map/knowledge-map]]",
+    "- [[notes/reference-patterns]]",
+    "- [[references/citations]]",
     "",
   ].join("\n");
 }
 
-function pitfallsContent(kb, topic) {
+function patternsContent(kb, topic) {
   return [
-    "# Common Pitfalls",
+    "# Reference Patterns",
     "",
-    "Recurring mistakes when working with **" + topic + "**. Each entry lists the symptom,",
-    "the underlying cause, and the fix.",
+    "Reusable Markdown structures for notes in **" + topic + "**.",
     "",
-    "## Pitfall 1 — Premature abstraction",
+    "## Concept note",
     "",
-    "**Symptom.** A generic helper with three call sites, each passing a different shape of data.",
+    "```markdown",
+    "# Concept name",
     "",
-    "**Cause.** The abstraction was designed before the variation was understood.",
+    "## Definition",
+    "Short canonical definition.",
     "",
-    "**Fix.** Inline the helper. Wait until you have at least three real, similar call sites.",
-    "Duplication is cheaper than the wrong abstraction.",
+    "## Links",
+    "- [[related-note]]",
+    "- [[sources/source-notes]]",
+    "```",
     "",
-    "## Pitfall 2 — Silent fallback",
+    "## Decision note",
     "",
-    "**Symptom.** A bug reported in production is not reproducible in staging.",
+    "Decision notes should link to [[notes/core-concepts]] and cite the source trail in [[references/citations]].",
     "",
-    "**Cause.** A `try/except` somewhere swallowed the original error and returned a default.",
+    "## Related",
     "",
-    "**Fix.** Delete the `except`. Let the error propagate. Log and re-raise if you need both.",
-    "",
-    "## Pitfall 3 — Heroic retries",
-    "",
-    "**Symptom.** A failing call eventually succeeds, but tail latency is terrible.",
-    "",
-    "**Cause.** The client is masking a provider-side problem with aggressive retries.",
-    "",
-    "**Fix.** Cap retries; add jitter; escalate to the caller when the budget is exhausted.",
+    "- [[README]]",
+    "- [[notes/open-questions]]",
     "",
   ].join("\n");
 }
 
-function sourceIntroContent(kb, topic) {
+function openQuestionsContent(kb, topic) {
   return [
-    "# Source Material",
+    "# Open Questions",
     "",
-    "Raw documents captured from upstream sources. These are **not edited** — only indexed.",
+    "Questions that should stay visible until someone adds a note or reference.",
     "",
-    "## Provenance",
+    "- Which source should be canonical when [[sources/source-notes]] disagree?",
+    "- Do we need a separate [[review-playbook]] for this vault?",
+    "- Should [[notes/reference-patterns]] include examples for every tag?",
     "",
-    "- Exported on " + (kb.updated || "—"),
-    "- " + (kb.items ?? "—") + " items, " + (kb.size || "—") + " total",
-    "- Canonical format: markdown with YAML front-matter",
+    "When a question is answered, convert it into a note and link it from [[map/knowledge-map]].",
+    "",
+  ].join("\n");
+}
+
+function sourceNotesContent(kb, topic) {
+  return [
+    "# Source Notes",
+    "",
+    "Source excerpts and provenance notes for **" + topic + "**.",
     "",
     "## Handling",
     "",
-    "1. Documents land here first.",
-    "2. A scheduled job normalizes headings, resolves relative links, and strips boilerplate.",
-    "3. The normalized result is chunked and embedded. See `config.yaml` for parameters.",
+    "1. Keep excerpts short and cite where they came from.",
+    "2. Link the interpretation note, usually [[notes/core-concepts]] or [[notes/reference-patterns]].",
+    "3. Move long references to [[references/citations]].",
     "",
-    "If a document is malformed, flag it in the ingest queue rather than editing it directly —",
-    "direct edits drift away from the source and are silently overwritten on the next re-import.",
+    "## Source ledger",
     "",
-  ].join("\n");
-}
-
-function changelogContent(kb, topic) {
-  return [
-    "# Changelog",
-    "",
-    "## " + (kb.updated || "recent"),
-    "",
-    "- Re-embedded all documents with the current model",
-    "- Added " + Math.max(3, Math.round((kb.items || 10) / 4)) + " new entries under `wiki/concepts/`",
-    "- Corrected broken cross-links in the overview",
-    "",
-    "## 1 week ago",
-    "",
-    "- Initial import from upstream",
-    "- Applied the default chunking configuration (512 / 64 overlap)",
+    "| Source | Used by | Notes |",
+    "| --- | --- | --- |",
+    "| Team docs | [[notes/core-concepts]] | Stable vocabulary and examples |",
+    "| Review notes | [[notes/reference-patterns]] | Patterns that passed review |",
     "",
   ].join("\n");
 }
 
-function configYamlContent(kb) {
-  const conf = (kb.indexing) || { chunkSize: 512, overlap: 64, embedding: "text-embedding-3-large" };
+function citationsContent(kb, topic) {
   return [
-    "# Indexing and retrieval configuration for this knowledge base.",
+    "# Citations",
     "",
-    "indexing:",
-    "  chunkSize: " + conf.chunkSize,
-    "  overlap: " + conf.overlap,
-    "  embedding: " + conf.embedding,
+    "Reference trail for notes in this vault.",
     "",
-    "retrieval:",
-    "  strategy: hybrid",
-    "  topK: 8",
-    "  minSimilarity: 0.72",
-    "  rerank: cross-encoder",
+    "## References",
     "",
-    "access: " + (kb.access || "workspace"),
+    "- Internal handbook sections linked from [[sources/source-notes]].",
+    "- Prior project notes connected through [[map/knowledge-map]].",
+    "- Review comments summarized in [[notes/reference-patterns]].",
     "",
-    "tags:",
-    ...(kb.tags || []).map(t => "  - " + t),
+    "## Maintenance",
+    "",
+    "When a citation changes, update the source note first, then check backlinks from the graph.",
     "",
   ].join("\n");
 }
