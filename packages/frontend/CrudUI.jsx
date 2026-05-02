@@ -96,6 +96,23 @@ function useEntityStore() {
     setTimeout(() => copy && persistCreate(key, copy), 0);
   }, [persistCreate]);
 
+  const importGitSkill = React.useCallback(async (payload) => {
+    if (!api?.importGitSkill) throw new Error("Backend is unavailable.");
+    const result = await api.importGitSkill(payload);
+    const skill = result?.skill || result;
+    if (!skill?.id) throw new Error("Import did not return a skill.");
+    setState(s => {
+      const exists = s.skills.some(x => x.id === skill.id);
+      return {
+        ...s,
+        skills: exists
+          ? s.skills.map(x => x.id === skill.id ? skill : x)
+          : [skill, ...s.skills],
+      };
+    });
+    return skill;
+  }, [api]);
+
   const createProject = React.useCallback(({ name, description, defaultTemplateId, icon, color, model }) => {
     const projectId = `proj-${Date.now().toString(36)}`;
     const sessionId = `sess-${Date.now().toString(36)}`;
@@ -283,7 +300,7 @@ function useEntityStore() {
   }, [state]);
 
   return {
-    state, create, append, update, remove, duplicate,
+    state, create, append, update, remove, duplicate, importGitSkill,
     createProject, createSession,
     archiveProject, archiveSession,
     renameProject, renameSession,

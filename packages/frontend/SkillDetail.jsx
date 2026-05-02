@@ -14,14 +14,27 @@ function SkillDetail({ skillId, store, goBack }) {
 
   const files = React.useMemo(() => ensureSkillFiles(skill), [skill.id, skill.files]);
   const defaultPath = React.useMemo(
-    () => (files.find(f => f.path === "skill.md") || files[0] || {}).path,
-    [files]
+    () => {
+      const previewPath = skill.preview?.path;
+      return (
+        (previewPath && files.find(f => f.path === previewPath)) ||
+        files.find(f => /^skill\.md$/i.test(f.path)) ||
+        files[0] ||
+        {}
+      ).path;
+    },
+    [files, skill.preview?.path]
   );
   const [activePath, setActivePath] = React.useState(defaultPath);
-  React.useEffect(() => { setActivePath(defaultPath); }, [skill.id]);
+  const [viewMode, setViewMode] = React.useState("rendered");
+  React.useEffect(() => {
+    setActivePath(defaultPath);
+    setViewMode("rendered");
+  }, [skill.id, defaultPath]);
 
   const active = files.find(f => f.path === activePath) || files[0];
   const nodes = React.useMemo(() => buildFileTree(files, f => f.path), [files]);
+  const source = skill.source?.type === "git" ? skill.source : null;
 
   return (
     <div className="simple-detail">
@@ -40,6 +53,20 @@ function SkillDetail({ skillId, store, goBack }) {
       <div className="simple-detail-head">
         <div className="sd-title mono">{skill.name}</div>
         {skill.desc && <div className="sd-desc">{skill.desc}</div>}
+        <div className="sd-meta skill-meta muted small">
+          {skill.category && <span>{skill.category}</span>}
+          {skill.kind && <><span className="sep">·</span><span>{skill.kind}</span></>}
+          <><span className="sep">·</span><span>{files.length} files</span></>
+          {source?.commit && <><span className="sep">·</span><span className="mono">{source.commit.slice(0, 7)}</span></>}
+          {source?.importedAt && <><span className="sep">·</span><span>imported {formatSkillDate(source.importedAt)}</span></>}
+        </div>
+        {source && (
+          <div className="skill-source-line">
+            <Icon name="branch" size={12} />
+            <span className="mono clamp-1">{source.url}</span>
+            {source.subdir && <span className="chip mono">{source.subdir}</span>}
+          </div>
+        )}
       </div>
 
       <div className="detail-twocol">
@@ -48,7 +75,7 @@ function SkillDetail({ skillId, store, goBack }) {
         </aside>
         <main className="file-preview">
           {active ? (
-            <FilePreview file={active} />
+            <FilePreview file={active} viewMode={viewMode} onViewMode={setViewMode} />
           ) : (
             <div className="empty-inline" style={{ padding: 60, textAlign: "center" }}>
               Select a file.
@@ -60,25 +87,39 @@ function SkillDetail({ skillId, store, goBack }) {
   );
 }
 
-function FilePreview({ file }) {
+function FilePreview({ file, viewMode, onViewMode }) {
   const isMd = /\.md$/i.test(file.path);
-  if (isMd) {
-    return (
-      <div className="file-preview-body md-scroll">
-        <MarkdownView source={file.content || ""} />
-      </div>
-    );
-  }
   return (
-    <div className="file-preview-body code-scroll">
-      <CodeEditor value={file.content || ""} language={languageForPath(file.path)} readOnly />
-    </div>
+    <>
+      <div className="file-preview-head">
+        <Icon name={iconForPath(file.path)} size={12} />
+        <span className="fp-path mono">{file.path}</span>
+        {file.size != null && <span className="muted mono">{formatBytes(file.size)}</span>}
+        <span style={{ flex: 1 }} />
+        {isMd && (
+          <SegControl value={viewMode} onChange={onViewMode}
+            options={[
+              { value: "rendered", label: "Rendered" },
+              { value: "source", label: "Source" },
+            ]} />
+        )}
+      </div>
+      {isMd && viewMode === "rendered" ? (
+        <div className="file-preview-body md-scroll">
+          <MarkdownView source={file.content || ""} />
+        </div>
+      ) : (
+        <div className="file-preview-body code-scroll">
+          <CodeEditor value={file.content || ""} language={languageForPath(file.path)} readOnly />
+        </div>
+      )}
+    </>
   );
 }
 
 function ensureSkillFiles(skill) {
   const existing = Array.isArray(skill.files) ? skill.files : [];
-  if (existing.some(f => f.path === "skill.md")) return existing;
+  if (existing.some(f => /^skill\.md$/i.test(f.path))) return existing;
   const md = { path: "skill.md", language: "markdown", content: defaultSkillMd(skill) };
   const fallback = existing.length
     ? existing
@@ -140,6 +181,19 @@ function defaultSkillPy(s) {
     '    return {"results": [f"match for {query}"]}',
     "",
   ].join("\n");
+}
+
+function formatSkillDate(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleString(undefined, { year: "numeric", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+}
+
+function formatBytes(value) {
+  const n = Number(value || 0);
+  if (n < 1024) return n + " B";
+  if (n < 1024 * 1024) return (n / 1024).toFixed(n < 10 * 1024 ? 1 : 0) + " KB";
+  return (n / (1024 * 1024)).toFixed(1) + " MB";
 }
 
 /* ——— Generic file tree (used by Skill and KB) ——— */

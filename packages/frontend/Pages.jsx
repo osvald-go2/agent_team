@@ -194,10 +194,11 @@ function SkillsPage({ store, onOpen }) {
   const list = store.state.skills;
   const [q, setQ] = React.useState("");
   const [cat, setCat] = React.useState("all");
-  const cats = [...new Set(list.map(s => s.category))];
+  const [importOpen, setImportOpen] = React.useState(false);
+  const cats = [...new Set(list.map(s => s.category || "uncategorized"))];
   const filtered = list.filter(s =>
-    (cat === "all" || s.category === cat) &&
-    (!q || (s.name + s.desc).toLowerCase().includes(q.toLowerCase()))
+    (cat === "all" || (s.category || "uncategorized") === cat) &&
+    (!q || ((s.name || "") + (s.desc || "") + (s.source?.url || "")).toLowerCase().includes(q.toLowerCase()))
   );
   const crud = useCrud("skills", store);
 
@@ -211,6 +212,9 @@ function SkillsPage({ store, onOpen }) {
           <div className="sub">Tools and capabilities agents can invoke. Built-in or custom (HTTP / MCP).</div>
         </div>
         <div className="spacer" />
+        <button className="btn-ghost" onClick={() => setImportOpen(true)}>
+          <Icon name="download" size={12} /> Import from Git
+        </button>
         <button className="btn-primary" onClick={() => {
           const id = `sk-${Date.now().toString(36)}`;
           store.create("skills", { ...seed, id, name: "new_skill" });
@@ -232,9 +236,11 @@ function SkillsPage({ store, onOpen }) {
       <table className="table">
         <thead>
           <tr>
-            <th style={{ width: "24%" }}>Skill</th>
+            <th style={{ width: "21%" }}>Skill</th>
             <th style={{ width: "10%" }}>Category</th>
             <th style={{ width: "8%" }}>Kind</th>
+            <th style={{ width: "15%" }}>Source</th>
+            <th style={{ width: "8%", textAlign: "right" }}>Files</th>
             <th>Description</th>
             <th style={{ width: "10%", textAlign: "right" }}>Calls · 7d</th>
             <th style={{ width: "6%" }}></th>
@@ -250,6 +256,8 @@ function SkillsPage({ store, onOpen }) {
                   {s.kind}
                 </span>
               </td>
+              <td><SkillSourceCell skill={s} /></td>
+              <td className="mono" style={{ textAlign: "right" }}>{skillFileCount(s)}</td>
               <td className="muted clamp-1">{s.desc}</td>
               <td className="mono" style={{ textAlign: "right" }}>{(s.calls || 0).toLocaleString()}</td>
               <td>
@@ -260,11 +268,17 @@ function SkillsPage({ store, onOpen }) {
                   onDelete={() => crud.askDelete(s)}
                 />
               </td>
-            </tr>
-          ))}
+          </tr>
+        ))}
         </tbody>
       </table>
 
+      <GitSkillImportDialog
+        open={importOpen}
+        onClose={() => setImportOpen(false)}
+        onImport={(payload) => store.importGitSkill(payload)}
+        onOpenSkill={(id) => onOpen && onOpen(id)}
+      />
       <EntityDrawer
         open={!!crud.drawer}
         mode={crud.drawer?.mode}
@@ -284,6 +298,101 @@ function SkillsPage({ store, onOpen }) {
         onConfirm={crud.confirmDelete}
         onCancel={() => crud.setConfirm(null)}
       />
+    </div>
+  );
+}
+
+function SkillSourceCell({ skill }) {
+  if (skill.source?.type === "git") {
+    const commit = (skill.source.commit || "").slice(0, 7);
+    return (
+      <div className="skill-source">
+        <span className="chip mono"><Icon name="branch" size={10} /> git{commit ? `:${commit}` : ""}</span>
+        {skill.source.subdir && <span className="muted mono clamp-1">{skill.source.subdir}</span>}
+      </div>
+    );
+  }
+  return <span className="muted">local</span>;
+}
+
+function skillFileCount(skill) {
+  const n = skill.meta?.fileCount ?? (Array.isArray(skill.files) ? skill.files.length : null);
+  return n == null ? "—" : n.toLocaleString();
+}
+
+function GitSkillImportDialog({ open, onClose, onImport, onOpenSkill }) {
+  const [url, setUrl] = React.useState("");
+  const [subdir, setSubdir] = React.useState("");
+  const [ref, setRef] = React.useState("");
+  const [busy, setBusy] = React.useState(false);
+  const [error, setError] = React.useState("");
+
+  React.useEffect(() => {
+    if (!open) return;
+    setUrl("");
+    setSubdir("");
+    setRef("");
+    setBusy(false);
+    setError("");
+  }, [open]);
+
+  if (!open) return null;
+
+  const submit = async () => {
+    if (busy) return;
+    if (!url.trim()) {
+      setError("Git URL is required.");
+      return;
+    }
+    setBusy(true);
+    setError("");
+    try {
+      const skill = await onImport({
+        url: url.trim(),
+        subdir: subdir.trim(),
+        ref: ref.trim(),
+      });
+      if (window.toast) window.toast("Skill imported", { kind: "success" });
+      onClose && onClose();
+      if (skill?.id && onOpenSkill) onOpenSkill(skill.id);
+    } catch (err) {
+      setError(err?.message || "Import failed.");
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="modal-backdrop" onClick={busy ? undefined : onClose}>
+      <div className="modal git-import-modal" onClick={e => e.stopPropagation()}>
+        <div className="modal-head">
+          <div className="modal-icon"><Icon name="download" size={14} /></div>
+          <div style={{ flex: 1 }}>
+            <div className="modal-title">Import skill from Git</div>
+            <div className="modal-body">Create a SQLite-backed skill snapshot from a repository path.</div>
+          </div>
+        </div>
+        <div className="git-import-fields">
+          <FieldRow label="Git URL">
+            <input autoFocus type="text" value={url} onChange={e => setUrl(e.target.value)}
+              placeholder="https://github.com/acme/skills.git" />
+          </FieldRow>
+          <FieldRow label="Subdirectory" hint="optional">
+            <input type="text" value={subdir} onChange={e => setSubdir(e.target.value)}
+              placeholder="skills/browser" />
+          </FieldRow>
+          <FieldRow label="Ref" hint="optional branch, tag or commit">
+            <input type="text" value={ref} onChange={e => setRef(e.target.value)}
+              placeholder="main" />
+          </FieldRow>
+          {error && <div className="form-error"><Icon name="alert" size={12} /> {error}</div>}
+        </div>
+        <div className="modal-actions">
+          <button className="btn-ghost" onClick={onClose} disabled={busy}>Cancel</button>
+          <button className="btn-primary-accent" onClick={submit} disabled={busy || !url.trim()}>
+            {busy ? <><span className="spinner-sm" /> Importing…</> : <><Icon name="download" size={11} /> Import</>}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }

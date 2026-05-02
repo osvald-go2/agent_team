@@ -8,9 +8,17 @@ window.AgentTeamApi = (() => {
       headers: { "Content-Type": "application/json", ...(options.headers || {}) },
       ...options,
     });
-    if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
-    if (res.status === 204) return null;
-    return res.json();
+    const text = await res.text();
+    if (!res.ok) {
+      let message = `${res.status} ${res.statusText}`;
+      try {
+        const payload = text ? JSON.parse(text) : null;
+        if (payload?.message || payload?.error) message = payload.message || payload.error;
+      } catch {}
+      throw new Error(message);
+    }
+    if (res.status === 204 || !text) return null;
+    return JSON.parse(text);
   }
 
   function wsUrl(sessionId) {
@@ -42,6 +50,12 @@ window.AgentTeamApi = (() => {
     async deleteEntity(kind, id) {
       return request(`/api/entities/${encodeURIComponent(kind)}/${encodeURIComponent(id)}`, {
         method: "DELETE",
+      });
+    },
+    async importGitSkill(payload) {
+      return request("/api/skills/import-git", {
+        method: "POST",
+        body: JSON.stringify(payload || {}),
       });
     },
     async createSession(payload) {

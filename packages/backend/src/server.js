@@ -11,6 +11,7 @@ import { CodexRunner } from "./runtime/codexRunner.js";
 import { Planner } from "./runtime/planner.js";
 import { Scheduler } from "./runtime/scheduler.js";
 import { WorkspaceManager } from "./runtime/workspace.js";
+import { importSkillFromGit, SkillImportError } from "./skills/gitImporter.js";
 
 const db = openDatabase();
 const repo = new Repository(db);
@@ -78,6 +79,24 @@ app.get("/health", (_req, res) => {
 
 app.get("/api/bootstrap", (_req, res) => {
   res.json(repo.bootstrap());
+});
+
+app.post("/api/skills/import-git", async (req, res) => {
+  try {
+    const skill = await importSkillFromGit(req.body, { repo });
+    publishEntity("skills", "upsert", skill);
+    res.status(201).json({ skill });
+  } catch (error) {
+    if (error instanceof SkillImportError) {
+      return res.status(error.status || 400).json({
+        error: error.code,
+        message: error.message,
+        details: error.details,
+      });
+    }
+    console.error("Skill import failed", error);
+    res.status(500).json({ error: "skill_import_failed", message: "Skill import failed." });
+  }
 });
 
 app.get("/api/entities/:kind", (req, res) => {
