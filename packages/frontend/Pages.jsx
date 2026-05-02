@@ -30,7 +30,8 @@ const SKILL_FIELDS = [
 
 const KB_FIELDS = [
   { name: "name", kind: "text", label: "Name" },
-  { name: "items", kind: "number", label: "Items" },
+  { name: "notes", kind: "number", label: "Notes" },
+  { name: "links", kind: "number", label: "Links" },
   { name: "size", kind: "text", label: "Size", placeholder: "e.g. 12.4 MB" },
   { name: "updated", kind: "text", label: "Last updated", placeholder: "2h ago" },
   { name: "tags", kind: "tags", label: "Tags", placeholder: "+ tag" },
@@ -289,20 +290,43 @@ function SkillsPage({ store, onOpen }) {
 }
 
 /* ——— Knowledge ——— */
+function kbNoteCount(k) {
+  if (Number.isFinite(k.notes)) return k.notes;
+  if (Number.isFinite(k.items)) return k.items;
+  if (Array.isArray(k.docs)) return k.docs.filter(d => /\.md$/i.test(d.name || "")).length;
+  return 0;
+}
+
+function kbLinkCount(k) {
+  if (Number.isFinite(k.links)) return k.links;
+  if (!Array.isArray(k.docs)) return Math.max(0, Math.round(kbNoteCount(k) * 2.8));
+  return k.docs.reduce((sum, d) => sum + ((d.content || "").match(/\[\[/g) || []).length, 0);
+}
+
+function kbFolderPreview(k) {
+  const tags = k.tags || [];
+  if (Array.isArray(k.foldersPreview) && k.foldersPreview.length) return k.foldersPreview.slice(0, 4);
+  if (Array.isArray(k.docs) && k.docs.length) {
+    const folders = [...new Set(k.docs.map(d => (d.name || "").split("/")[0]).filter(Boolean))];
+    return folders.slice(0, 4);
+  }
+  return ["00-home", tags[0] || "notes", tags[1] || "references", "sources"].slice(0, 4);
+}
+
 function KnowledgePage({ store, onOpen }) {
   const list = store.state.knowledge;
   const [q, setQ] = React.useState("");
-  const filtered = list.filter(k => !q || (k.name + (k.tags || []).join(" ")).toLowerCase().includes(q.toLowerCase()));
+  const filtered = list.filter(k => !q || (k.name + (k.desc || "") + (k.tags || []).join(" ")).toLowerCase().includes(q.toLowerCase()));
   const crud = useCrud("knowledge", store);
 
-  const seed = { name: "", items: 0, size: "0 MB", updated: "just now", tags: [] };
+  const seed = { name: "", desc: "", notes: 0, links: 0, size: "0 KB", updated: "just now", tags: [] };
 
   return (
     <div className="page-wrap">
       <div className="page-head">
         <div>
           <h2>Knowledge bases</h2>
-          <div className="sub">Indexed document stores agents can retrieve from.</div>
+          <div className="sub">Markdown vaults with folders, wiki links, and references.</div>
         </div>
         <div className="spacer" />
         <button className="btn-primary" onClick={() => {
@@ -319,15 +343,19 @@ function KnowledgePage({ store, onOpen }) {
         <button className="filter-pill active">All · {filtered.length}</button>
       </div>
       <div className="grid-cards">
-        {filtered.map(k => (
-          <div key={k.id} className="grid-card clickable" onClick={() => onOpen ? onOpen(k.id) : crud.openView(k)}>
+        {filtered.map(k => {
+          const folders = kbFolderPreview(k);
+          const notes = kbNoteCount(k);
+          const links = kbLinkCount(k);
+          return (
+          <div key={k.id} className="grid-card clickable kb-vault-card" onClick={() => onOpen ? onOpen(k.id) : crud.openView(k)}>
             <div className="row">
-              <span className="ag-ico" style={{ background: "var(--bg-sunken)", color: "var(--ink-2)", width: 30, height: 30, borderRadius: 7, display: "grid", placeItems: "center", border: "1px solid var(--line)" }}>
+              <span className="kb-vault-ico">
                 <Icon name="book" size={14} />
               </span>
               <div style={{ flex: 1, minWidth: 0 }}>
                 <h3>{k.name}</h3>
-                <div className="muted mono" style={{ fontSize: 10.5 }}>{k.id}</div>
+                <div className="muted mono" style={{ fontSize: 10.5 }}>markdown vault</div>
               </div>
               <RowMenu
                 onView={() => onOpen ? onOpen(k.id) : crud.openView(k)}
@@ -336,16 +364,25 @@ function KnowledgePage({ store, onOpen }) {
                 onDelete={() => crud.askDelete(k)}
               />
             </div>
+            {k.desc && <div className="sub clamp-2">{k.desc}</div>}
+            <div className="kb-vault-preview" aria-hidden="true">
+              {folders.map((folder, i) => (
+                <div key={folder} className="kb-vault-layer" style={{ "--depth": i }}>
+                  <Icon name="folder" size={11} />
+                  <span>{folder}</span>
+                </div>
+              ))}
+            </div>
             <div className="row-wrap">
               {(k.tags || []).map(t => <span key={t} className="chip" style={{ fontSize: 11 }}>#{t}</span>)}
             </div>
             <div className="metric-row">
-              <span><Icon name="doc" size={11} /> <span className="val">{k.items}</span> items</span>
-              <span><Icon name="cube" size={11} /> <span className="val">{k.size}</span></span>
+              <span><Icon name="doc" size={11} /> <span className="val">{notes}</span> notes</span>
+              <span><Icon name="link" size={11} /> <span className="val">{links}</span> links</span>
               <span><Icon name="clock" size={11} /> <span className="val">{k.updated}</span></span>
             </div>
           </div>
-        ))}
+        );})}
         <div className="grid-card new-card" onClick={() => {
           const id = `kb-${Date.now().toString(36)}`;
           store.create("knowledge", { ...seed, id, name: "Untitled KB" });
@@ -370,7 +407,7 @@ function KnowledgePage({ store, onOpen }) {
       <ConfirmDialog
         open={!!crud.confirm}
         title={`Delete ${crud.confirm?.name}?`}
-        body="The knowledge base will be removed; indexed documents stay in storage."
+        body="The Markdown vault will be removed from this workspace."
         onConfirm={crud.confirmDelete}
         onCancel={() => crud.setConfirm(null)}
       />

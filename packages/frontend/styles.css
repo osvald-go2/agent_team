@@ -2261,6 +2261,40 @@ input[type="text"], input[type="number"], input[type="password"], textarea, sele
   cursor: pointer; font-family: inherit;
 }
 .kb-card-avail:hover { border-style: solid; border-color: var(--accent); background: var(--accent-bg); }
+.kb-vault-card { min-height: 236px; }
+.kb-vault-ico {
+  width: 30px; height: 30px; border-radius: 7px;
+  display: grid; place-items: center; flex: none;
+  background: color-mix(in oklch, var(--accent) 10%, var(--panel));
+  color: var(--accent);
+  border: 1px solid color-mix(in oklch, var(--accent) 24%, var(--line));
+}
+.kb-vault-preview {
+  display: grid;
+  gap: 4px;
+  padding: 8px 8px 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background:
+    linear-gradient(90deg, color-mix(in oklch, var(--line) 70%, transparent) 0 1px, transparent 1px 100%) 18px 0 / 1px 100% no-repeat,
+    var(--bg-sunken);
+}
+.kb-vault-layer {
+  display: flex; align-items: center; gap: 6px;
+  min-width: 0;
+  padding: 3px 7px;
+  margin-left: calc(var(--depth) * 12px);
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--panel);
+  color: var(--ink-2);
+  font-size: 11.5px;
+}
+.kb-vault-layer span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 
 /* Schema editor */
 .schema-head { display: flex; justify-content: flex-end; margin-bottom: 10px; }
@@ -2812,6 +2846,320 @@ input[type="text"], input[type="number"], input[type="password"], textarea, sele
   overflow: hidden;
   text-overflow: ellipsis;
   min-width: 0;
+}
+
+/* Knowledge vault detail */
+.kb-vault-head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 18px;
+}
+.kb-vault-stats {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+  max-width: 520px;
+}
+.kb-vault-stats span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 24px;
+  padding: 0 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--panel);
+  color: var(--ink-2);
+  font-size: 11.5px;
+}
+.kb-vault-layout {
+  display: grid;
+  grid-template-columns: 268px minmax(520px, 1fr) 328px;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--bg);
+}
+@media (max-width: 1240px) {
+  .kb-vault-layout { grid-template-columns: 236px minmax(440px, 1fr) 292px; }
+}
+.kb-tree-pane,
+.kb-side-pane {
+  min-height: 0;
+  overflow: auto;
+  background: var(--panel);
+}
+.kb-tree-pane {
+  border-right: 1px solid var(--line);
+  padding: 10px 6px 14px;
+}
+.kb-side-pane {
+  border-left: 1px solid var(--line);
+  padding: 10px;
+}
+.kb-pane-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 8px 10px;
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 8px;
+}
+.kb-pane-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ink);
+}
+.kb-tree-pane .ft2-row.folder {
+  margin-top: 4px;
+  color: var(--ink-2);
+}
+.kb-tree-pane .ft2-row.file.active {
+  background: color-mix(in oklch, var(--accent) 13%, var(--panel));
+}
+.kb-note-pane {
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+}
+.kb-note-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 46px;
+  padding: 8px 18px;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel-2);
+}
+.kb-note-path {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  color: var(--ink-3);
+  font-size: 12px;
+}
+.kb-note-path .current {
+  color: var(--ink);
+  font-weight: 500;
+}
+.kb-note-path .sep {
+  color: var(--ink-4);
+}
+.kb-note-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 24px 40px 42px;
+}
+.kb-note-meta {
+  max-width: 860px;
+  margin-bottom: 16px;
+}
+.kb-note-meta h2 {
+  margin: 0 0 8px;
+  color: var(--ink);
+  font-size: 22px;
+  line-height: 1.25;
+}
+.kb-note-meta-line {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-wrap: wrap;
+  color: var(--ink-3);
+  font-size: 11.5px;
+}
+.kb-note-meta-line > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.kb-md-body {
+  max-width: 860px;
+}
+.kb-md-body .wiki-link {
+  display: inline;
+  padding: 0 4px;
+  border-radius: 4px;
+  background: color-mix(in oklch, var(--accent) 10%, transparent);
+  border-bottom: 1px solid color-mix(in oklch, var(--accent) 42%, transparent);
+  color: var(--accent);
+  cursor: pointer;
+}
+.kb-md-body .wiki-link:hover {
+  background: color-mix(in oklch, var(--accent) 15%, transparent);
+  text-decoration: none;
+}
+.kb-md-body .wiki-link.missing {
+  color: var(--warn);
+  background: color-mix(in oklch, var(--warn) 11%, transparent);
+  border-bottom-style: dashed;
+}
+.kb-reference-strip {
+  max-width: 860px;
+  margin-top: 26px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
+.kb-ref-label {
+  margin-bottom: 8px;
+  color: var(--ink-3);
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.kb-ref-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.kb-ref-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 240px;
+  height: 26px;
+  padding: 0 9px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--panel);
+  color: var(--ink-2);
+  font: inherit;
+  font-size: 11.5px;
+  cursor: pointer;
+}
+.kb-ref-chip span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.kb-ref-chip:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.kb-ref-chip.missing {
+  color: var(--warn);
+  border-style: dashed;
+  cursor: default;
+}
+.kb-side-section {
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg);
+}
+.kb-side-section + .kb-side-section {
+  margin-top: 10px;
+}
+.kb-section-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+.kb-section-head h3 {
+  margin: 0 0 2px;
+  font-size: 12.5px;
+  color: var(--ink);
+}
+.kb-graph {
+  width: 100%;
+  height: auto;
+  min-height: 208px;
+  display: block;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background:
+    radial-gradient(circle at 50% 48%, color-mix(in oklch, var(--accent) 8%, transparent), transparent 42%),
+    var(--panel);
+}
+.kb-graph-edges line {
+  stroke: var(--line-strong);
+  stroke-width: 1;
+  opacity: 0.55;
+  vector-effect: non-scaling-stroke;
+}
+.kb-graph-edges line.active {
+  stroke: var(--accent);
+  opacity: 0.9;
+}
+.kb-graph-node {
+  color: var(--ink-3);
+  cursor: pointer;
+}
+.kb-graph-node circle {
+  fill: var(--panel);
+  stroke: var(--line-strong);
+  stroke-width: 1.5;
+  vector-effect: non-scaling-stroke;
+}
+.kb-graph-node text {
+  fill: currentColor;
+  font-size: 9.5px;
+  text-anchor: middle;
+  pointer-events: none;
+}
+.kb-graph-node.active {
+  color: var(--accent);
+}
+.kb-graph-node.active circle {
+  fill: var(--accent);
+  stroke: var(--accent);
+}
+.kb-graph-node.missing {
+  color: var(--warn);
+  cursor: default;
+}
+.kb-graph-node.missing circle {
+  stroke-dasharray: 3 3;
+  fill: color-mix(in oklch, var(--warn) 8%, var(--panel));
+}
+.kb-backlink-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.kb-backlink {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 9px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--panel);
+  color: var(--ink);
+  text-align: left;
+  font: inherit;
+  cursor: pointer;
+}
+.kb-backlink:hover {
+  border-color: var(--line-strong);
+  background: var(--bg-sunken);
+}
+.kb-backlink-title {
+  font-size: 12px;
+  font-weight: 500;
+}
+.kb-backlink-path {
+  color: var(--ink-4);
+  font-size: 10.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.kb-backlink-context {
+  color: var(--ink-3);
+  font-size: 11.5px;
+  line-height: 1.4;
 }
 
 /* Markdown body (GitHub-ish) */
